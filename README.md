@@ -2,8 +2,10 @@
 
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=flat-square&logo=fastapi&logoColor=white)
-![Tests](https://img.shields.io/badge/Tests-105%20Passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)
+[![CI Pipeline](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/actions/workflows/ci.yml)
+![Tests](https://img.shields.io/badge/Tests-117%20Passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)
 ![Ruff](https://img.shields.io/badge/Linting-Ruff-D7FF64?style=flat-square)
+![LLM Gateway](https://img.shields.io/badge/Gateway-OpenAI%20%7C%20OpenRouter-blueviolet?style=flat-square)
 ![Docker Ready](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square)
 
@@ -29,34 +31,53 @@ Standard off-the-shelf RAG pipelines fail in production for three predictable re
 
 DocuQuery is a Clean Architecture FastAPI microservice with five strictly bounded layers. Dependency arrows point strictly inward: the presentation layer (`api`) never touches the database; the storage layer never formats response payloads.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Client / Browser                        │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ HTTPS / SSE
-┌──────────────────────────▼──────────────────────────────────────┐
-│                  Presentation Layer  (src/api)                   │
-│   POST /query   POST /query/stream   POST /ingest/file           │
-│   GET  /health  GET  /analytics/recent                           │
-│   FastAPI routers · Pydantic v2 DTOs · SSE StreamingResponse    │
-└──────────────┬───────────────────────────────┬──────────────────┘
-               │ RAGEngine                     │ IngestionPipeline
-┌──────────────▼───────────────────────────────▼──────────────────┐
-│                   Domain & Core Layer  (src/core)                │
-│   RAGEngine · TokenBudgetManager · build_rag_prompt              │
-│   Anti-hallucination system prompt · FALLBACK_REFUSAL_MESSAGE    │
-│   VectorStoreInterface · AuditRepositoryInterface (ABCs)         │
-│   DocumentChunk · RetrievalResult · Citation · RAGResult         │
-└──────────────┬───────────────────────────────┬──────────────────┘
-               │ similarity_search             │ add_documents
-┌──────────────▼──────────────┐ ┌─────────────▼──────────────────┐
-│  Ingestion Layer (src/       │ │  Storage Layer  (src/storage)   │
-│  ingestion)                 │ │                                  │
-│  TokenSlidingWindowChunker  │ │  ChromaVectorStore               │
-│  IngestionPipeline          │ │    └─ asyncio.to_thread wrapping │
-│  Batch embedding (OpenAI)   │ │  SQLiteAuditRepository           │
-└─────────────────────────────┘ │    └─ aiosqlite persistent conn  │
-                                └──────────────────────────────────┘
+```mermaid
+flowchart TD
+    Client(["🌐 Client / Browser"])
+
+    subgraph Presentation["Presentation Layer  (src/api)"]
+        direction TB
+        R1["POST /query"]
+        R2["POST /query/stream  (SSE)"]
+        R3["POST /ingest/file"]
+        R4["GET  /analytics/recent"]
+        DI["Lifespan DI · Pydantic v2 DTOs · SSE StreamingResponse"]
+    end
+
+    subgraph Domain["Domain & Core Layer  (src/core)"]
+        direction TB
+        RAG["RAGEngine"]
+        TBM["TokenBudgetManager\n(greedy bin-packing, cl100k_base)"]
+        AHG["Anti-Hallucination Guardrails\n(FALLBACK_REFUSAL_MESSAGE · citation enforcement)"]
+        ABCs["VectorStoreInterface · AuditRepositoryInterface  (ABCs)"]
+    end
+
+    subgraph Ingestion["Ingestion Layer  (src/ingestion)"]
+        direction TB
+        CHK["TokenSlidingWindowChunker\n(BPE sliding window)"]
+        PIP["IngestionPipeline\n(chunk → embed → index)"]
+    end
+
+    subgraph Storage["Storage Layer  (src/storage)"]
+        direction TB
+        VEC["ChromaVectorStore\n(asyncio.to_thread · HNSW cosine)"]
+        ADB["SQLiteAuditRepository\n(aiosqlite · persistent connection)"]
+    end
+
+    subgraph Gateways["External Gateways"]
+        direction TB
+        OAI["OpenAI Official Platform\ngpt-4o-mini · text-embedding-3-small"]
+        ORT["OpenRouter / vLLM / LocalAI\n(OpenAI-compatible via OPENAI_BASE_URL)"]
+    end
+
+    Client -->|"HTTPS / SSE"| Presentation
+    Presentation -->|"RAGEngine"| Domain
+    Presentation -->|"IngestionPipeline"| Ingestion
+    Domain -->|"similarity_search"| Storage
+    Domain -->|"TelemetryRecord"| Storage
+    Ingestion -->|"add_documents"| Storage
+    Domain -->|"chat.completions"| Gateways
+    Ingestion -->|"embeddings.create"| Gateways
 ```
 
 **Query flow (non-streaming):**
@@ -122,7 +143,7 @@ All service instances (vector store, OpenAI client, audit repository, RAG engine
 
 ```bash
 # 1. Clone and configure
-git clone https://github.com/your-org/docuquery-rag-agent.git
+git clone https://github.com/Nazar-Plokhuta/docuquery-rag-agent.git
 cd docuquery-rag-agent
 cp .env.example .env
 # Edit .env and set OPENAI_API_KEY=sk-...
@@ -157,7 +178,9 @@ cp .env.example .env
 uvicorn src.main:app --reload --port 8000
 
 # 5. Open the interactive API docs
-# http://localhost:8000/api/docs
+# Swagger UI  → http://localhost:8000/api/docs
+# ReDoc       → http://localhost:8000/api/redoc
+# Root path / → automatically redirects to /api/docs
 ```
 
 ---
@@ -300,12 +323,93 @@ curl -s -X POST http://localhost:8000/api/v1/query/ \
 
 ---
 
+## Multi-Gateway Support
+
+DocuQuery targets **any OpenAI-compatible inference gateway** with zero codebase changes. The `OPENAI_BASE_URL` setting is the single control point:
+
+| Gateway | `OPENAI_BASE_URL` | `OPENAI_API_KEY` |
+|---|---|---|
+| OpenAI (default) | *(unset)* | `sk-...` |
+| [OpenRouter](https://openrouter.ai) | `https://openrouter.ai/api/v1` | OpenRouter key |
+| vLLM (self-hosted) | `http://localhost:8001/v1` | `EMPTY` |
+| LocalAI | `http://localhost:8080/v1` | `sk-unused` |
+| Azure OpenAI | `https://<resource>.openai.azure.com/openai` | Azure key |
+
+Both LLM completions (`chat.completions`) and embedding calls (`embeddings.create`) are routed through the same base URL. No adapter swap, no code change — only environment variables.
+
+---
+
+## Verified Live Evaluation
+
+The following results are captured against the indexed document **"THE SCIENTIFIC METHOD IN IT AND COMPUTER SCIENCE"** ingested into a live development instance.
+
+### Grounded Query — Structured JSON Response
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/query/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "On what three principles does the scientific method in computer science rest?",
+    "top_k": 5,
+    "score_threshold": 0.3
+  }' | jq
+```
+
+```json
+{
+  "query": "On what three principles does the scientific method in computer science rest?",
+  "answer": "The scientific method in computer science rests on three core principles: (1) empirical observation — conclusions must be grounded in measurable, reproducible evidence; (2) falsifiability — a hypothesis must be formulated in a way that allows it to be disproven; and (3) systematic experimentation — claims must be validated through controlled, repeatable procedures. [Source: the_scientific_method_in_it_and_computer_science, Section: 2. Core Principles of the Scientific Method]",
+  "citations": [
+    {
+      "source": "the_scientific_method_in_it_and_computer_science",
+      "section": "2. Core Principles of the Scientific Method",
+      "chunk_id": "the_scientific_method_in_it_and_computer_science#c0002"
+    },
+    {
+      "source": "the_scientific_method_in_it_and_computer_science",
+      "section": "2. Core Principles of the Scientific Method",
+      "chunk_id": "the_scientific_method_in_it_and_computer_science#c0003"
+    }
+  ],
+  "latency_ms": 1673.4,
+  "total_tokens": 387
+}
+```
+
+### Refusal Guardrail — Out-of-Scope Concepts
+
+Queries about topics absent from the indexed corpus (such as ML data drift and overfitting) trigger the deterministic `FALLBACK_REFUSAL_MESSAGE`, returning an empty citations array (`citations: []`) and preventing hallucinated output.
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/query/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "How does ML data drift and model overfitting affect production inference pipelines?",
+    "top_k": 5,
+    "score_threshold": 0.3
+  }' | jq
+```
+
+```json
+{
+  "query": "How does ML data drift and model overfitting affect production inference pipelines?",
+  "answer": "I am sorry, but the provided documentation does not contain sufficient information to answer your question.",
+  "citations": [],
+  "latency_ms": 3144.8,
+  "total_tokens": 723
+}
+```
+
+> **Observation:** The retrieval stage identified relevant background chunks for the general IT query, but because specific mechanisms for ML data drift and overfitting were absent from the source document, the LLM guardrail strictly returned `FALLBACK_REFUSAL_MESSAGE` and suppressed citations (`citations: []`), eliminating the risk of external fabrication.
+
+---
+
 ## Quality Assurance
 
 ### Running the Test Suite
 
 ```bash
-# Run all 105 tests
+# Run all 117 tests
 pytest
 
 # Run with verbose output and coverage
@@ -398,7 +502,7 @@ docuquery-rag-agent/
 │   │   └── dependencies.py# Depends factories resolving services from app.state
 │   └── main.py          # FastAPI app · lifespan DI graph · exception handlers
 ├── tests/
-│   ├── unit/            # 75 unit tests (zero external dependencies)
+│   ├── unit/            # 84 unit tests (zero external dependencies)
 │   └── integration/     # 33 integration tests (mocked engine/pipeline/repo)
 ├── data/
 │   └── sample_docs/     # Enterprise sample documents for testing and demos
