@@ -6,7 +6,9 @@ from pathlib import Path
 
 from src.core.exceptions import UnsupportedFileTypeError
 from src.ingestion.loaders.base import BaseDocumentLoader
+from src.ingestion.loaders.csv_loader import CsvDocumentLoader
 from src.ingestion.loaders.docx import DocxDocumentLoader
+from src.ingestion.loaders.excel import ExcelDocumentLoader
 from src.ingestion.loaders.pdf import PdfDocumentLoader
 from src.ingestion.loaders.text import TextDocumentLoader
 
@@ -15,6 +17,8 @@ _SUPPORTED_EXTENSIONS: dict[str, type[BaseDocumentLoader]] = {
     ".md": TextDocumentLoader,
     ".pdf": PdfDocumentLoader,
     ".docx": DocxDocumentLoader,
+    ".csv": CsvDocumentLoader,
+    ".xlsx": ExcelDocumentLoader,
 }
 
 
