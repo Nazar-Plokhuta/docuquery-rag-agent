@@ -27,7 +27,13 @@ from src.api.routes import health as health_router
 from src.api.routes import ingestion as ingestion_router
 from src.api.routes import query as query_router
 from src.config.settings import get_settings
-from src.core.exceptions import AppException, ResourceNotFoundError, StorageError
+from src.core.exceptions import (
+    AppException,
+    DocumentParsingError,
+    ResourceNotFoundError,
+    StorageError,
+    UnsupportedFileTypeError,
+)
 from src.core.rag.engine import RAGEngine
 from src.core.rag.token_counter import TokenBudgetManager
 from src.ingestion.chunker import TokenSlidingWindowChunker
@@ -179,6 +185,8 @@ def _exception_to_status(exc: AppException) -> int:
     """
     mapping: dict[type[AppException], int] = {
         ResourceNotFoundError: 404,
+        DocumentParsingError: 422,
+        UnsupportedFileTypeError: 415,
         StorageError: 503,
     }
     return mapping.get(type(exc), 500)

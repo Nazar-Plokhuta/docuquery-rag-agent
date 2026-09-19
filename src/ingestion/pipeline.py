@@ -9,6 +9,7 @@ it trivially testable in isolation with stub implementations of each interface.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from openai import AsyncOpenAI
 from src.config.settings import Settings
 from src.core.interfaces import VectorStoreInterface
 from src.ingestion.chunker import TokenSlidingWindowChunker
+from src.ingestion.loaders.factory import DocumentLoaderFactory
 
 logger = logging.getLogger(__name__)
 
@@ -76,21 +78,24 @@ class IngestionPipeline:
         """Ingest a single document end-to-end.
 
         Processing steps:
-        1. Read the document as UTF-8 text.
+        1. Read raw bytes and decode/extract text via a format-specific loader.
         2. Segment into overlapping token-bounded chunks.
         3. Call the OpenAI Embeddings API in batches of at most
            ``_EMBEDDING_BATCH_SIZE`` chunks.
         4. Persist each batch of (chunk, embedding) pairs via the vector store.
 
         Args:
-            file_path: Path to the source document (plain text or Markdown).
+            file_path: Path to the source document (``.txt``, ``.md``, or ``.pdf``).
 
         Returns:
             Total number of ``DocumentChunk`` objects successfully ingested.
             Returns 0 for empty documents without raising.
         """
         document_id: str = file_path.stem
-        text: str = file_path.read_text(encoding="utf-8")
+        file_bytes: bytes = await asyncio.to_thread(file_path.read_bytes)
+        loader = DocumentLoaderFactory.get_loader(file_path.suffix)
+        loaded = await loader.load(file_bytes, file_path.name)
+        text: str = loaded.content
 
         chunks = self._chunker.chunk_document(document_id, text)
         if not chunks:

@@ -1,7 +1,7 @@
 """Integration tests for ``POST /api/v1/ingest/file`` (document ingestion endpoint).
 
 Coverage:
-- HTTP 415 on unsupported file extensions (.pdf, .exe, .docx).
+- HTTP 415 on unsupported file extensions (.exe, .docx).
 - HTTP 422 when no filename is included in the multipart upload.
 - HTTP 200 with valid ``IngestResponse`` for ``.md`` files.
 - HTTP 200 with valid ``IngestResponse`` for ``.txt`` files.
@@ -16,18 +16,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from httpx import AsyncClient
-
-
-@pytest.mark.asyncio
-async def test_ingest_rejects_pdf_extension(
-    integration_client: AsyncClient,
-) -> None:
-    """``POST /api/v1/ingest/file`` must return HTTP 415 for ``.pdf`` uploads."""
-    response = await integration_client.post(
-        "/api/v1/ingest/file",
-        files={"file": ("document.pdf", b"%PDF-1.4 content", "application/pdf")},
-    )
-    assert response.status_code == 415
 
 
 @pytest.mark.asyncio

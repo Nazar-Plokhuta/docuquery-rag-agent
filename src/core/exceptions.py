@@ -45,3 +45,18 @@ class StorageError(AppException):
     Wraps lower-level driver exceptions to prevent storage internals from
     leaking into API responses or logs at unexpected severity levels.
     """
+
+
+class DocumentParsingError(AppException):
+    """Raised when uploaded bytes cannot be parsed into extractable text.
+
+    Typical triggers: corrupted PDFs, encrypted PDFs, or empty binary payloads.
+    Maps to HTTP 422 at the presentation layer.
+    """
+
+
+class UnsupportedFileTypeError(AppException):
+    """Raised when no loader is registered for the uploaded file extension.
+
+    Maps to HTTP 415 at the presentation layer when raised from the domain layer.
+    """
