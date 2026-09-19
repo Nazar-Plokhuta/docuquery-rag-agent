@@ -209,10 +209,12 @@ async def app_exception_handler(request: Request, exc: AppException) -> JSONResp
 # Router registration
 # ---------------------------------------------------------------------------
 
+
 @app.get("/", include_in_schema=False)
 async def root_redirect() -> RedirectResponse:
     """Redirect root requests to interactive OpenAPI documentation."""
     return RedirectResponse(url="/api/docs")
+
 
 app.include_router(health_router.router, prefix="/api/v1")
 app.include_router(query_router.router, prefix="/api/v1")

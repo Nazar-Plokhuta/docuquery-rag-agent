@@ -64,9 +64,7 @@ def _make_settings(**extra: str | None) -> Settings:
 class TestOpenAIBaseUrl:
     """Validate the ``openai_base_url`` field on the Settings model."""
 
-    def test_defaults_to_none_when_not_supplied(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_defaults_to_none_when_not_supplied(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``openai_base_url`` must be ``None`` when neither the env var nor a kwarg is set."""
         # Remove the env var from the process environment so it cannot bleed in
         # even with ``_env_file=None`` (which only suppresses .env file reads).
@@ -95,9 +93,7 @@ class TestOpenAIBaseUrl:
         settings = _make_settings()
         assert settings.openai_base_url == expected_url
 
-    def test_none_is_preserved_when_env_var_absent(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_none_is_preserved_when_env_var_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When ``OPENAI_BASE_URL`` is removed from the process env, the field is ``None``."""
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
         settings = _make_settings()
@@ -144,9 +140,7 @@ class TestSettingsFieldRegressions:
         """``log_level`` must default to ``'INFO'``."""
         assert _make_settings().log_level == "INFO"
 
-    def test_openai_base_url_defaults_to_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_openai_base_url_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``openai_base_url`` must be ``None`` in the default configuration.
 
         Uses ``monkeypatch`` to guarantee the env var is absent so the test

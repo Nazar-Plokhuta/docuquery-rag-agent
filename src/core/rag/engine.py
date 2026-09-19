@@ -255,9 +255,7 @@ class RAGEngine:
         # unable (or instructed) to ground its response in the retrieved context,
         # so attaching citations would imply false provenance.
         citations = (
-            []
-            if FALLBACK_REFUSAL_MESSAGE in answer
-            else self._extract_citations(budgeted_chunks)
+            [] if FALLBACK_REFUSAL_MESSAGE in answer else self._extract_citations(budgeted_chunks)
         )
 
         await self._log_telemetry(
