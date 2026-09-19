@@ -3,7 +3,8 @@
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=flat-square&logo=fastapi&logoColor=white)
 [![CI Pipeline](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/actions/workflows/ci.yml)
-![Tests](https://img.shields.io/badge/Tests-117%20Passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)
+![Tests](https://img.shields.io/badge/Tests-160%20Passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)
+![Formats](https://img.shields.io/badge/Formats-PDF%20%7C%20DOCX%20%7C%20XLSX%20%7C%20CSV%20%7C%20HTML%20%7C%20MD-informational?style=flat-square)
 ![Ruff](https://img.shields.io/badge/Linting-Ruff-D7FF64?style=flat-square)
 ![LLM Gateway](https://img.shields.io/badge/Gateway-OpenAI%20%7C%20OpenRouter-blueviolet?style=flat-square)
 ![Docker Ready](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white)
@@ -54,8 +55,9 @@ flowchart TD
 
     subgraph Ingestion["Ingestion Layer  (src/ingestion)"]
         direction TB
+        LD["DocumentLoaderFactory\n(PDF · DOCX · XLSX · CSV · HTML · MD)"]
         CHK["TokenSlidingWindowChunker\n(BPE sliding window)"]
-        PIP["IngestionPipeline\n(chunk → embed → index)"]
+        PIP["IngestionPipeline\n(load → chunk → embed → index)"]
     end
 
     subgraph Storage["Storage Layer  (src/storage)"]
@@ -135,6 +137,19 @@ Every network call, database operation, and filesystem interaction is `async`/`a
 
 All service instances (vector store, OpenAI client, audit repository, RAG engine) are constructed **once** at application startup and shared across requests via `app.state`. Routers depend on abstract interfaces, not on concrete adapters. Swapping ChromaDB for Weaviate requires changing one file.
 
+### Universal Multi-Format Document Ingestion
+
+DocuQuery utilizes an extensible **Strategy + Factory** pattern (`DocumentLoaderFactory`) offloaded to `asyncio.to_thread` for non-blocking I/O. Citations are strictly anchored to source-native sections and pages:
+
+| Format | Extensions | Extraction Strategy & Provenance | Engine / Library |
+|---|---|---|---|
+| **Markdown & Text** | `.md`, `.txt` | Direct UTF-8 stream decode, ATX heading section tracking (`# Section`) | Built-in |
+| **PDF Documents** | `.pdf` | Multi-page text extraction with page-level citations (`Section: Page {n}`) | `pypdf` |
+| **Word Documents** | `.docx` | Paragraph & table body traversal with heading mapping (`#`..`######`) | `python-docx` |
+| **Tabular Spreadsheets** | `.xlsx` | Multi-sheet parsing with sheet-anchored citations (`Section: Sheet: {name}`) | `openpyxl` |
+| **Delimited Data** | `.csv` | Dialect/delimiter sniffing, multi-encoding fallback, table / key-value views | Built-in (`csv`) |
+| **HTML / Web Pages** | `.html`, `.htm` | DOM cleanup (stripping `<script>`, `<style>`, `<nav>`, `<footer>`), `h1-h6` conversion | `beautifulsoup4` |
+
 ---
 
 ## Quickstart
@@ -208,11 +223,16 @@ curl -s http://localhost:8000/api/v1/health/ | jq
 
 ### Ingest a Document
 
-Upload a `.md` or `.txt` file. The service chunks, embeds, and indexes the content.
+Upload a supported document. Accepted extensions: `.md`, `.txt`, `.pdf`, `.docx`, `.csv`, `.xlsx`, `.html`, `.htm`. The service loads via the format-specific loader, chunks, embeds, and indexes the content.
 
 ```bash
+# Markdown
 curl -s -X POST http://localhost:8000/api/v1/ingest/file \
   -F "file=@data/sample_docs/sla_policy.md" | jq
+
+# PDF or Word (same endpoint; path is your local file)
+curl -s -X POST http://localhost:8000/api/v1/ingest/file \
+  -F "file=@./enterprise_policy.docx" | jq
 ```
 
 ```json
@@ -409,10 +429,7 @@ curl -s -X POST http://localhost:8000/api/v1/query/ \
 ### Running the Test Suite
 
 ```bash
-# Run all 117 tests
-pytest
-
-# Run with verbose output and coverage
+# Run full automated test suite (160 tests)
 pytest -v
 
 # Run only unit tests
@@ -420,6 +437,9 @@ pytest tests/unit/
 
 # Run only integration tests
 pytest tests/integration/
+
+# Run offline multi-format loader smoke verification
+python scripts/verify_all_loaders.py
 ```
 
 All tests are fully isolated: no live OpenAI credentials, no running ChromaDB server, and no network access are required. Mocks cover all external boundaries.
@@ -491,8 +511,9 @@ docuquery-rag-agent/
 │   │       ├── token_counter.py# TokenBudgetManager — greedy bin-packing
 │   │       └── prompts.py      # Anti-hallucination system prompt + citation format
 │   ├── ingestion/
+│   │   ├── loaders/     # BaseDocumentLoader, Factory, PDF, DOCX, CSV, Excel, HTML, Text
 │   │   ├── chunker.py   # TokenSlidingWindowChunker — cl100k_base BPE sliding window
-│   │   └── pipeline.py  # IngestionPipeline — chunk → embed → index
+│   │   └── pipeline.py  # IngestionPipeline — load → chunk → embed → index
 │   ├── storage/
 │   │   ├── vector_store.py# ChromaVectorStore — asyncio.to_thread HNSW adapter
 │   │   └── audit_db.py  # SQLiteAuditRepository — aiosqlite persistent connection
@@ -502,12 +523,13 @@ docuquery-rag-agent/
 │   │   └── dependencies.py# Depends factories resolving services from app.state
 │   └── main.py          # FastAPI app · lifespan DI graph · exception handlers
 ├── tests/
-│   ├── unit/            # 84 unit tests (zero external dependencies)
-│   └── integration/     # 33 integration tests (mocked engine/pipeline/repo)
+│   ├── unit/            # Unit tests (loaders, chunker, RAG, settings — zero live APIs)
+│   └── integration/     # Integration tests (mocked engine/pipeline/repo)
 ├── data/
 │   └── sample_docs/     # Enterprise sample documents for testing and demos
 ├── scripts/
-│   └── smoke_test.py    # Async E2E smoke test script (httpx)
+│   ├── smoke_test.py           # Async E2E smoke test script (httpx)
+│   └── verify_all_loaders.py   # Offline loader verification suite
 ├── docs/
 │   └── internal/
 │       ├── architecture.md  # Authoritative architecture reference + ADR log
