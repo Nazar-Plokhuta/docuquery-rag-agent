@@ -88,8 +88,7 @@ class TestChunkSizeBoundary:
 
         for chunk in chunker.chunk_document("size-test", text):
             assert chunk.token_count <= chunk_size, (
-                f"Chunk {chunk.chunk_id} has {chunk.token_count} tokens; "
-                f"limit is {chunk_size}."
+                f"Chunk {chunk.chunk_id} has {chunk.token_count} tokens; limit is {chunk_size}."
             )
 
     def test_token_count_matches_actual_encoding(self) -> None:
@@ -112,9 +111,7 @@ class TestChunkOverlap:
         """Adjacent chunks must share ≈ chunk_overlap tokens at their boundary."""
         chunk_size = 60
         chunk_overlap = 12
-        chunker = TokenSlidingWindowChunker(
-            chunk_size=chunk_size, chunk_overlap=chunk_overlap
-        )
+        chunker = TokenSlidingWindowChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         chunks = chunker.chunk_document("overlap-test", _long_text(400))
 
         assert len(chunks) >= 2, "Need at least 2 chunks to verify overlap."
@@ -136,9 +133,7 @@ class TestChunkOverlap:
         """Overlap should be consistent across all consecutive chunk pairs."""
         chunk_size = 60
         chunk_overlap = 10
-        chunker = TokenSlidingWindowChunker(
-            chunk_size=chunk_size, chunk_overlap=chunk_overlap
-        )
+        chunker = TokenSlidingWindowChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         chunks = chunker.chunk_document("multi-overlap", _long_text(500))
 
         for prev, nxt in zip(chunks, chunks[1:], strict=False):
@@ -175,12 +170,7 @@ class TestMarkdownSectionMetadata:
         chunker = _make_chunker(chunk_size=40, chunk_overlap=5)
         intro_body = "Intro sentence. " * 10
         methods_body = "Methods sentence. " * 10
-        text = (
-            "## Introduction\n"
-            + intro_body
-            + "\n## Methods\n"
-            + methods_body
-        )
+        text = "## Introduction\n" + intro_body + "\n## Methods\n" + methods_body
         chunks = chunker.chunk_document("sections-doc", text)
 
         # At least some chunks should be in 'Methods' after the heading.

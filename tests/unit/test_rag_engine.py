@@ -124,9 +124,7 @@ class TestRAGEngineQuery:
         engine, mock_vs, mock_ar, mock_oc, _ = _build_engine()
 
         # Embedding succeeds but similarity search returns a below-threshold result.
-        mock_oc.embeddings.create = AsyncMock(
-            return_value=_make_mock_embedding_response()
-        )
+        mock_oc.embeddings.create = AsyncMock(return_value=_make_mock_embedding_response())
         mock_vs.similarity_search = AsyncMock(
             return_value=[_make_retrieval_result(score=0.1)]  # below 0.3 threshold
         )
@@ -147,9 +145,7 @@ class TestRAGEngineQuery:
         """Fallback path must still persist a TelemetryRecord with zero token counts."""
         engine, mock_vs, mock_ar, mock_oc, _ = _build_engine()
 
-        mock_oc.embeddings.create = AsyncMock(
-            return_value=_make_mock_embedding_response()
-        )
+        mock_oc.embeddings.create = AsyncMock(return_value=_make_mock_embedding_response())
         mock_vs.similarity_search = AsyncMock(return_value=[])
         mock_ar.log_query = AsyncMock()
 
@@ -169,13 +165,9 @@ class TestRAGEngineQuery:
         mock_tb.fit_contexts_to_budget.return_value = [retrieval_result]
 
         engine, mock_vs, mock_ar, mock_oc, _ = _build_engine(token_budget=mock_tb)
-        mock_oc.embeddings.create = AsyncMock(
-            return_value=_make_mock_embedding_response()
-        )
+        mock_oc.embeddings.create = AsyncMock(return_value=_make_mock_embedding_response())
         mock_vs.similarity_search = AsyncMock(return_value=[retrieval_result])
-        mock_oc.chat.completions.create = AsyncMock(
-            return_value=_make_mock_completion_response()
-        )
+        mock_oc.chat.completions.create = AsyncMock(return_value=_make_mock_completion_response())
         mock_ar.log_query = AsyncMock()
 
         await engine.query("How does async I/O work?", score_threshold=0.3)
@@ -193,13 +185,9 @@ class TestRAGEngineQuery:
         mock_tb.fit_contexts_to_budget.return_value = [retrieval_result]
 
         engine, mock_vs, mock_ar, mock_oc, _ = _build_engine(token_budget=mock_tb)
-        mock_oc.embeddings.create = AsyncMock(
-            return_value=_make_mock_embedding_response()
-        )
+        mock_oc.embeddings.create = AsyncMock(return_value=_make_mock_embedding_response())
         mock_vs.similarity_search = AsyncMock(return_value=[retrieval_result])
-        mock_oc.chat.completions.create = AsyncMock(
-            return_value=_make_mock_completion_response()
-        )
+        mock_oc.chat.completions.create = AsyncMock(return_value=_make_mock_completion_response())
         mock_ar.log_query = AsyncMock()
 
         result: RAGResult = await engine.query("List all endpoints.")
@@ -215,14 +203,10 @@ class TestRAGEngineQuery:
         retrieval_result = _make_retrieval_result(score=0.88)
         mock_tb = MagicMock(spec=TokenBudgetManager)
         mock_tb.fit_contexts_to_budget.return_value = [retrieval_result]
-        completion = _make_mock_completion_response(
-            prompt_tokens=200, completion_tokens=50
-        )
+        completion = _make_mock_completion_response(prompt_tokens=200, completion_tokens=50)
 
         engine, mock_vs, mock_ar, mock_oc, _ = _build_engine(token_budget=mock_tb)
-        mock_oc.embeddings.create = AsyncMock(
-            return_value=_make_mock_embedding_response()
-        )
+        mock_oc.embeddings.create = AsyncMock(return_value=_make_mock_embedding_response())
         mock_vs.similarity_search = AsyncMock(return_value=[retrieval_result])
         mock_oc.chat.completions.create = AsyncMock(return_value=completion)
         mock_ar.log_query = AsyncMock()
@@ -242,8 +226,7 @@ class TestRAGEngineQuery:
         mock_tb = MagicMock(spec=TokenBudgetManager)
         mock_tb.fit_contexts_to_budget.return_value = [retrieval_result]
         answer_text = (
-            "Async I/O is achieved via asyncio. "
-            "[Source: tech-spec, Section: Architecture]"
+            "Async I/O is achieved via asyncio. [Source: tech-spec, Section: Architecture]"
         )
         completion = _make_mock_completion_response(
             content=answer_text,
@@ -252,9 +235,7 @@ class TestRAGEngineQuery:
         )
 
         engine, mock_vs, mock_ar, mock_oc, _ = _build_engine(token_budget=mock_tb)
-        mock_oc.embeddings.create = AsyncMock(
-            return_value=_make_mock_embedding_response()
-        )
+        mock_oc.embeddings.create = AsyncMock(return_value=_make_mock_embedding_response())
         mock_vs.similarity_search = AsyncMock(return_value=[retrieval_result])
         mock_oc.chat.completions.create = AsyncMock(return_value=completion)
         mock_ar.log_query = AsyncMock()
@@ -271,9 +252,7 @@ class TestRAGEngineQuery:
     async def test_empty_similarity_search_returns_fallback(self) -> None:
         """An empty similarity search result (no results at all) triggers refusal."""
         engine, mock_vs, mock_ar, mock_oc, _ = _build_engine()
-        mock_oc.embeddings.create = AsyncMock(
-            return_value=_make_mock_embedding_response()
-        )
+        mock_oc.embeddings.create = AsyncMock(return_value=_make_mock_embedding_response())
         mock_vs.similarity_search = AsyncMock(return_value=[])
         mock_ar.log_query = AsyncMock()
 
@@ -283,6 +262,45 @@ class TestRAGEngineQuery:
         assert result.citations == []
         mock_oc.chat.completions.create.assert_not_called()
 
+    async def test_llm_refusal_returns_empty_citations(self) -> None:
+        """Citations MUST be empty when the LLM itself returns the refusal phrase.
+
+        Scenario: chunks pass the score threshold and are budgeted, but the LLM
+        answers with FALLBACK_REFUSAL_MESSAGE (e.g. the system prompt guard fires
+        inside the model).  Attaching citations to a refusal implies false
+        provenance and violates the anti-hallucination contract.
+        """
+        retrieval_result = _make_retrieval_result(
+            document_id="classified-doc",
+            section="Redacted",
+            score=0.91,
+        )
+        mock_tb = MagicMock(spec=TokenBudgetManager)
+        mock_tb.fit_contexts_to_budget.return_value = [retrieval_result]
+
+        # LLM explicitly refuses despite receiving context.
+        refusal_completion = _make_mock_completion_response(
+            content=FALLBACK_REFUSAL_MESSAGE,
+            prompt_tokens=80,
+            completion_tokens=15,
+        )
+
+        engine, mock_vs, mock_ar, mock_oc, _ = _build_engine(token_budget=mock_tb)
+        mock_oc.embeddings.create = AsyncMock(return_value=_make_mock_embedding_response())
+        mock_vs.similarity_search = AsyncMock(return_value=[retrieval_result])
+        mock_oc.chat.completions.create = AsyncMock(return_value=refusal_completion)
+        mock_ar.log_query = AsyncMock()
+
+        result: RAGResult = await engine.query("Tell me the classified details.")
+
+        assert result.answer == FALLBACK_REFUSAL_MESSAGE
+        assert result.citations == [], (
+            "A refusal answer must never carry source citations — "
+            "doing so implies false provenance."
+        )
+        # The LLM *was* called (chunks passed threshold); confirm that.
+        mock_oc.chat.completions.create.assert_awaited_once()
+
     async def test_token_budget_is_applied_before_completion(self) -> None:
         """token_budget.fit_contexts_to_budget must be called with filtered chunks."""
         retrieval_result = _make_retrieval_result(score=0.8)
@@ -290,13 +308,9 @@ class TestRAGEngineQuery:
         mock_tb.fit_contexts_to_budget.return_value = [retrieval_result]
 
         engine, mock_vs, mock_ar, mock_oc, _ = _build_engine(token_budget=mock_tb)
-        mock_oc.embeddings.create = AsyncMock(
-            return_value=_make_mock_embedding_response()
-        )
+        mock_oc.embeddings.create = AsyncMock(return_value=_make_mock_embedding_response())
         mock_vs.similarity_search = AsyncMock(return_value=[retrieval_result])
-        mock_oc.chat.completions.create = AsyncMock(
-            return_value=_make_mock_completion_response()
-        )
+        mock_oc.chat.completions.create = AsyncMock(return_value=_make_mock_completion_response())
         mock_ar.log_query = AsyncMock()
 
         await engine.query("What is the architecture?")
@@ -317,9 +331,7 @@ class TestRAGEngineStream:
     async def test_stream_query_yields_fallback_when_no_chunks_pass_threshold(self) -> None:
         """When no chunks meet the score threshold, exactly the refusal phrase is yielded."""
         engine, mock_vs, mock_ar, mock_oc, _ = _build_engine()
-        mock_oc.embeddings.create = AsyncMock(
-            return_value=_make_mock_embedding_response()
-        )
+        mock_oc.embeddings.create = AsyncMock(return_value=_make_mock_embedding_response())
         mock_vs.similarity_search = AsyncMock(
             return_value=[_make_retrieval_result(score=0.05)]  # well below threshold
         )
@@ -338,9 +350,7 @@ class TestRAGEngineStream:
         mock_tb.fit_contexts_to_budget.return_value = [retrieval_result]
 
         engine, mock_vs, mock_ar, mock_oc, _ = _build_engine(token_budget=mock_tb)
-        mock_oc.embeddings.create = AsyncMock(
-            return_value=_make_mock_embedding_response()
-        )
+        mock_oc.embeddings.create = AsyncMock(return_value=_make_mock_embedding_response())
         mock_vs.similarity_search = AsyncMock(return_value=[retrieval_result])
 
         # Build an async generator that simulates the OpenAI stream.
@@ -367,9 +377,7 @@ class TestRAGEngineStream:
         mock_tb.fit_contexts_to_budget.return_value = [retrieval_result]
 
         engine, mock_vs, mock_ar, mock_oc, _ = _build_engine(token_budget=mock_tb)
-        mock_oc.embeddings.create = AsyncMock(
-            return_value=_make_mock_embedding_response()
-        )
+        mock_oc.embeddings.create = AsyncMock(return_value=_make_mock_embedding_response())
         mock_vs.similarity_search = AsyncMock(return_value=[retrieval_result])
 
         async def _mock_stream_with_none() -> AsyncGenerator[MagicMock, None]:
@@ -382,9 +390,7 @@ class TestRAGEngineStream:
             real_chunk.choices[0].delta.content = "Hello"
             yield real_chunk
 
-        mock_oc.chat.completions.create = AsyncMock(
-            return_value=_mock_stream_with_none()
-        )
+        mock_oc.chat.completions.create = AsyncMock(return_value=_mock_stream_with_none())
 
         received: list[str] = []
         async for token in engine.stream_query("Hello?", score_threshold=0.3):
@@ -395,9 +401,7 @@ class TestRAGEngineStream:
     async def test_stream_query_empty_similarity_result_yields_fallback(self) -> None:
         """An empty similarity search result triggers the fallback in stream_query too."""
         engine, mock_vs, mock_ar, mock_oc, _ = _build_engine()
-        mock_oc.embeddings.create = AsyncMock(
-            return_value=_make_mock_embedding_response()
-        )
+        mock_oc.embeddings.create = AsyncMock(return_value=_make_mock_embedding_response())
         mock_vs.similarity_search = AsyncMock(return_value=[])
 
         tokens: list[str] = []

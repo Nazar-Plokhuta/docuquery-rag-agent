@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     openai_api_key: str = "sk-placeholder"
     openai_model: str = "gpt-4o-mini"
     embedding_model: str = "text-embedding-3-small"
+    # Optional custom OpenAI-compatible gateway (e.g. OpenRouter, vLLM, LocalAI).
+    # When None, the AsyncOpenAI client defaults to the official OpenAI platform.
+    openai_base_url: str | None = None
 
     # ------------------------------------------------------------------
     # Vector store (ChromaDB)

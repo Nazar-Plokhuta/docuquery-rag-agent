@@ -106,9 +106,7 @@ class TestLogQuery:
         assert len(logs) == 1
         assert logs[0].request_id == record.request_id
 
-    async def test_log_query_all_fields_round_trip(
-        self, repo: SQLiteAuditRepository
-    ) -> None:
+    async def test_log_query_all_fields_round_trip(self, repo: SQLiteAuditRepository) -> None:
         """Every field of a ``TelemetryRecord`` must survive a write-read round-trip."""
         original = _make_record("round-trip-001")
         await repo.log_query(original)
@@ -142,9 +140,7 @@ class TestLogQuery:
 
 
 class TestGetRecentLogs:
-    async def test_empty_table_returns_empty_list(
-        self, repo: SQLiteAuditRepository
-    ) -> None:
+    async def test_empty_table_returns_empty_list(self, repo: SQLiteAuditRepository) -> None:
         """``get_recent_logs`` on an empty table must return an empty list."""
         logs = await repo.get_recent_logs()
         assert logs == []
@@ -165,9 +161,7 @@ class TestGetRecentLogs:
         logs = await repo.get_recent_logs()  # default limit=50
         assert len(logs) == 50
 
-    async def test_ordering_is_descending_by_created_at(
-        self, repo: SQLiteAuditRepository
-    ) -> None:
+    async def test_ordering_is_descending_by_created_at(self, repo: SQLiteAuditRepository) -> None:
         """Records must be returned in descending ``created_at`` order."""
         timestamps = [
             "2026-09-19T07:00:00Z",
@@ -195,9 +189,7 @@ class TestGetRecentLogs:
             f"Expected descending order, got: {returned_timestamps!r}"
         )
 
-    async def test_returns_list_of_telemetry_records(
-        self, repo: SQLiteAuditRepository
-    ) -> None:
+    async def test_returns_list_of_telemetry_records(self, repo: SQLiteAuditRepository) -> None:
         """``get_recent_logs`` must return a list of ``TelemetryRecord`` instances."""
         await repo.log_query(_make_record())
         logs = await repo.get_recent_logs()

@@ -181,9 +181,7 @@ class SQLiteAuditRepository(AuditRepositoryInterface):
             async with conn.execute(_SELECT_RECENT_SQL, (limit,)) as cursor:
                 rows = await cursor.fetchall()
         except Exception as exc:
-            raise StorageError(
-                f"Failed to retrieve recent telemetry logs: {exc}"
-            ) from exc
+            raise StorageError(f"Failed to retrieve recent telemetry logs: {exc}") from exc
 
         return [
             TelemetryRecord(

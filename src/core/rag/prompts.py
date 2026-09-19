@@ -81,8 +81,7 @@ def build_rag_prompt(
     """
     combined_context = "\n\n".join(retrieved_contexts)
     user_content = (
-        f"--- BEGIN CONTEXT ---\n{combined_context}\n--- END CONTEXT ---\n\n"
-        f"Question: {query}"
+        f"--- BEGIN CONTEXT ---\n{combined_context}\n--- END CONTEXT ---\n\nQuestion: {query}"
     )
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},

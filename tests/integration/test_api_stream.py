@@ -101,7 +101,7 @@ async def test_stream_sse_events_are_valid_json(
     for line in response.text.splitlines():
         if not line.startswith("data:"):
             continue
-        payload = line[len("data: "):]
+        payload = line[len("data: ") :]
         if payload.strip() == "[DONE]":
             continue
         # Must be valid JSON with a "token" key.

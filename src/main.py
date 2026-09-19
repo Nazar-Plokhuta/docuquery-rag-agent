@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 # Boot-time infrastructure provisioning
 # ---------------------------------------------------------------------------
 
+
 async def _provision_directories() -> None:
     """Ensure all required data directories exist before accepting traffic.
 
@@ -61,6 +62,7 @@ async def _provision_directories() -> None:
 # ---------------------------------------------------------------------------
 # Lifespan context manager
 # ---------------------------------------------------------------------------
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -108,7 +110,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── OpenAI client ────────────────────────────────────────────────────────
     # A single ``AsyncOpenAI`` instance is reused across all requests to share
     # the underlying httpx connection pool and avoid per-request TLS handshakes.
-    openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
+    # ``base_url`` is conditionally forwarded only when explicitly configured to
+    # avoid passing ``None`` to the SDK, which some versions treat as an error.
+    openai_kwargs: dict[str, str] = {"api_key": settings.openai_api_key}
+    if settings.openai_base_url is not None:
+        openai_kwargs["base_url"] = settings.openai_base_url
+        logger.info("OpenAI client using custom base URL: %s", settings.openai_base_url)
+    openai_client = AsyncOpenAI(**openai_kwargs)  # type: ignore[arg-type]
 
     # ── Domain / core layer ──────────────────────────────────────────────────
     token_budget = TokenBudgetManager()
@@ -161,6 +169,7 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 # Global domain-exception → HTTP error handler
 # ---------------------------------------------------------------------------
+
 
 def _exception_to_status(exc: AppException) -> int:
     """Map domain exception types to canonical HTTP status codes.

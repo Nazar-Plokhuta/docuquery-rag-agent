@@ -133,9 +133,7 @@ class RAGEngine:
         """
         return [
             Citation(
-                source=str(
-                    result.chunk.metadata.get("document_id", result.chunk.document_id)
-                ),
+                source=str(result.chunk.metadata.get("document_id", result.chunk.document_id)),
                 section=str(result.chunk.metadata.get("section", "")),
                 chunk_id=result.chunk.chunk_id,
             )
@@ -252,7 +250,15 @@ class RAGEngine:
         total_tokens: int = usage.total_tokens if usage else 0
 
         latency_ms = (time.perf_counter() - start_time) * 1000.0
-        citations = self._extract_citations(budgeted_chunks)
+
+        # A refusal answer must never carry source attributions — the LLM was
+        # unable (or instructed) to ground its response in the retrieved context,
+        # so attaching citations would imply false provenance.
+        citations = (
+            []
+            if FALLBACK_REFUSAL_MESSAGE in answer
+            else self._extract_citations(budgeted_chunks)
+        )
 
         await self._log_telemetry(
             query_text=query_text,

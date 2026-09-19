@@ -1,8 +1,8 @@
 # DocuQuery RAG Agent — Living Implementation State
 
 **Version:** 0.1.0  
-**Sprint:** 2 (complete)  
-**Test suite:** 33 tests — all passing  
+**Sprint:** 5 (complete)  
+**Test suite:** 105 tests — all passing  
 **Last updated:** 2026-09-19  
 
 > This document is a living record. Update it whenever a sprint closes or an ADR is ratified.
@@ -18,7 +18,13 @@
    - [2.3 `src/storage/vector_store.py`](#23-srcstoragevector_storepy)
    - [2.4 `src/ingestion/chunker.py`](#24-srcingestionchunkerpy)
    - [2.5 `src/ingestion/pipeline.py`](#25-srcingestionpipelinepy)
-   - [2.6 `src/main.py`](#26-srcmainpy)
+   - [2.6 `src/core/rag/prompts.py`](#26-srccoreragpromptspy)
+   - [2.7 `src/core/rag/token_counter.py`](#27-srccoreragtoken_counterpy)
+   - [2.8 `src/core/rag/engine.py`](#28-srccoreragenginepy)
+   - [2.9 `src/api/routes/query.py`](#29-srcapiroutesquerypy)
+   - [2.10 `src/api/routes/ingestion.py`](#210-srcapiroutesingestionpy)
+   - [2.11 `src/api/routes/analytics.py`](#211-srcapiroutesanalyticspy)
+   - [2.12 `src/main.py`](#212-srcmainpy)
 3. [Test Suite Inventory](#3-test-suite-inventory)
 4. [Architectural Decision Log](#4-architectural-decision-log)
 
@@ -30,7 +36,9 @@
 |---|---|---|
 | Sprint 1 | Project scaffold, `Settings`, `AppException` hierarchy, `VectorStoreInterface`, `AuditRepositoryInterface`, `DocumentChunk`, `RetrievalResult`, `TelemetryRecord`, `HealthResponse`, `GET /api/v1/health/` | Complete |
 | Sprint 2 | `SQLiteAuditRepository`, `ChromaVectorStore`, `TokenSlidingWindowChunker`, `IngestionPipeline`, lifespan startup/teardown with audit DB lifecycle, full 33-test suite | Complete |
-| Sprint 3 | RAG query endpoint, LLM orchestration, anti-hallucination prompt, SSE streaming, token-bounded context assembly | Planned |
+| Sprint 3 | `RAGEngine` (non-streaming query), `TokenBudgetManager`, `build_rag_prompt`, anti-hallucination system prompt, `Citation` and `RAGResult` domain models, `POST /api/v1/query/` endpoint, audit telemetry logging | Complete |
+| Sprint 4 | SSE streaming query (`POST /api/v1/query/stream`), document ingestion endpoint (`POST /api/v1/ingest/file`), analytics endpoint (`GET /api/v1/analytics/recent`), full 105-test suite | Complete |
+| Sprint 5 | `docs/internal/architecture.md` update (endpoints, ADR-05, ADR-06), enterprise sample datasets (`data/sample_docs/`), E2E smoke test script (`scripts/smoke_test.py`), B2B showcase `README.md` | Complete |
 
 ---
 
@@ -50,6 +58,7 @@
 | `openai_api_key` | `str` | `"sk-placeholder"` | `OPENAI_API_KEY` |
 | `openai_model` | `str` | `"gpt-4o-mini"` | `OPENAI_MODEL` |
 | `embedding_model` | `str` | `"text-embedding-3-small"` | `EMBEDDING_MODEL` |
+| `openai_base_url` | `str \| None` | `None` | `OPENAI_BASE_URL` |
 | `chroma_persist_directory` | `str` | `"./data/chroma_db"` | `CHROMA_PERSIST_DIRECTORY` |
 | `sqlite_database_path` | `str` | `"./data/telemetry.db"` | `SQLITE_DATABASE_PATH` |
 
@@ -100,7 +109,7 @@ await audit_repo.initialize_db()
 app.state.audit_repo = audit_repo
 ```
 
-Sprint 3 dependency injection will resolve `SQLiteAuditRepository` from `request.app.state.audit_repo` via a `Depends` factory, avoiding per-request reconnection overhead.
+Dependency injection resolves `SQLiteAuditRepository` from `request.app.state.audit_repo` via a `Depends` factory, avoiding per-request reconnection overhead.
 
 #### Error Handling
 
@@ -132,7 +141,7 @@ The cached `Collection` handle is safe to share across coroutines because all mu
 The collection is created with:
 
 ```python
-metadata={"hnsw:space": "cosine"}
+metadata = {"hnsw:space": "cosine"}
 ```
 
 This instructs Chroma's HNSW index to measure angular distance rather than L2 Euclidean distance. OpenAI `text-embedding-3-small` embeddings are unit-normalised, making cosine distance the correct metric — identical vectors yield distance 0, orthogonal vectors yield distance 1.
@@ -291,7 +300,112 @@ Returns the total number of chunks indexed. Returns `0` without raising for docu
 
 ---
 
-### 2.6 `src/main.py`
+### 2.6 `src/core/rag/prompts.py`
+
+**Constants:** `FALLBACK_REFUSAL_MESSAGE`, `_SYSTEM_PROMPT`  
+**Function:** `build_rag_prompt(query, retrieved_contexts) -> list[dict[str, str]]`
+
+#### Anti-Hallucination System Prompt
+
+The system prompt enforces four rules by prompt instruction (not post-processing):
+
+1. Answer **exclusively** from the provided context chunks.
+2. If context is insufficient, output `FALLBACK_REFUSAL_MESSAGE` verbatim.
+3. Do not fabricate facts, invent sources, hallucinate, or speculate.
+4. Every factual claim must carry `[Source: <source>, Section: <section>]`.
+
+#### Message Structure
+
+`build_rag_prompt` returns a two-element list:
+
+```
+[
+  {"role": "system", "content": _SYSTEM_PROMPT},
+  {"role": "user",   "content": "--- BEGIN CONTEXT ---\n{chunks}\n--- END CONTEXT ---\n\nQuestion: {query}"}
+]
+```
+
+The `--- BEGIN CONTEXT ---` / `--- END CONTEXT ---` delimiters provide unambiguous framing so the model can distinguish retrieved evidence from the user question. The structure matches the canonical instruction-following pattern for GPT-4-class models, where system-turn instructions receive the highest weight.
+
+---
+
+### 2.7 `src/core/rag/token_counter.py`
+
+**Class:** `TokenBudgetManager`
+
+#### `count_tokens(text, encoding_name)`
+
+Encodes `text` with `tiktoken.get_encoding(encoding_name)` and returns `len(tokens)`. The default encoding is `"cl100k_base"`, matching the ingestion chunker and the GPT-4 / `text-embedding-3-small` family.
+
+#### `fit_contexts_to_budget(chunks, max_context_tokens)`
+
+Greedy bin-packing algorithm:
+
+1. Sort `chunks` by descending `score` (highest-confidence evidence first).
+2. Walk the sorted list; admit each chunk whose `token_count` fits within the remaining budget.
+3. Return the admitted subset in the same descending-score order.
+
+This greedy approach is optimal for the common case where all chunks are similar in size. The `max_context_tokens` default of `2 500` leaves headroom within GPT-4o-mini's 128 k context for the system prompt, user message framing, and completion output.
+
+---
+
+### 2.8 `src/core/rag/engine.py`
+
+**Class:** `RAGEngine`
+
+#### Query Pipeline (non-streaming)
+
+`RAGEngine.query()` orchestrates the following pipeline stages in order:
+
+| Stage | Implementation |
+|---|---|
+| Query embedding | `AsyncOpenAI.embeddings.create` |
+| Top-k retrieval | `VectorStoreInterface.similarity_search` |
+| Score threshold filtering | Inline list comprehension (`score >= threshold`) |
+| Fast-path refusal | Return `FALLBACK_REFUSAL_MESSAGE` with zero tokens if no chunks survive |
+| Token budgeting | `TokenBudgetManager.fit_contexts_to_budget` |
+| Prompt construction | `build_rag_prompt(query, contexts)` |
+| LLM completion | `AsyncOpenAI.chat.completions.create(temperature=0.0)` |
+| Citation extraction | `_extract_citations(budgeted_chunks)` |
+| Telemetry logging | `AuditRepositoryInterface.log_query(TelemetryRecord)` |
+
+`temperature=0.0` is enforced unconditionally to maximise determinism and minimise hallucination risk from stochastic sampling.
+
+#### Streaming Pipeline
+
+`RAGEngine.stream_query()` is an `async def` generator. The retrieval, filtering, and budgeting stages are identical to `query()`. After prompt construction, it calls `chat.completions.create(stream=True)` and yields each `delta.content` string from the async stream. `None` deltas (produced by the first streaming chunk which carries only the role announcement) are silently skipped.
+
+Telemetry is not logged for streaming queries because the OpenAI streaming API does not include a usage object in the default `stream=True` response.
+
+---
+
+### 2.9 `src/api/routes/query.py`
+
+**Endpoints:** `POST /api/v1/query/` and `POST /api/v1/query/stream`
+
+The non-streaming endpoint delegates to `RAGEngine.query()` and serialises the result as `QueryResponse`. The streaming endpoint wraps `RAGEngine.stream_query()` in an `_event_generator()` async generator that formats each token delta as a `data: {"token": "..."}\n\n` SSE event and appends `data: [DONE]\n\n` after the generator is exhausted.
+
+Both endpoints share the same `QueryRequest` DTO, which enforces `extra="forbid"` and `min_length=1` on `query`.
+
+---
+
+### 2.10 `src/api/routes/ingestion.py`
+
+**Endpoint:** `POST /api/v1/ingest/file`
+
+Validates the uploaded file extension against `_ALLOWED_EXTENSIONS = {".md", ".txt"}`. Writes content to a named temp directory preserving the original filename (so `IngestionPipeline` derives the correct `document_id` from `Path.stem`). Delegates to `IngestionPipeline.ingest_document()`. Cleans up the temp directory unconditionally in a `finally` block regardless of ingestion success or failure.
+
+---
+
+### 2.11 `src/api/routes/analytics.py`
+
+**Endpoint:** `GET /api/v1/analytics/recent`
+
+Delegates to `AuditRepositoryInterface.get_recent_logs(limit)` and wraps the result in `AnalyticsResponse`. The `limit` query parameter is validated in the range `[1, 1000]` by FastAPI's `Query(ge=1, le=1000)` constraint.
+
+---
+
+### 2.12 `src/main.py`
 
 #### Lifespan Startup/Teardown Sequence
 
@@ -303,8 +417,13 @@ The `@asynccontextmanager` lifespan function controls the full application boot:
 | 2 | `_provision_directories()` — idempotent `mkdir(parents=True, exist_ok=True)` for `chroma_persist_directory` and `sqlite_database_path` parent |
 | 3 | `SQLiteAuditRepository(settings).initialize_db()` — open persistent connection, create schema |
 | 4 | `app.state.audit_repo = audit_repo` — attach to application state for downstream DI |
-| 5 | `yield` — application is live and accepting requests |
-| 6 | `audit_repo.close()` — drain in-flight writes, close the SQLite connection |
+| 5 | `ChromaVectorStore(settings)` — lazy adapter; no I/O yet |
+| 6 | `AsyncOpenAI(api_key=settings.openai_api_key)` — shared httpx connection pool |
+| 7 | `TokenBudgetManager()` — loads `cl100k_base` BPE vocabulary once |
+| 8 | `RAGEngine(...)` — assemble with all dependencies |
+| 9 | `IngestionPipeline(...)` — assemble with chunker, vector store, OpenAI client |
+| 10 | Attach all services to `app.state`; `yield` — application is live |
+| 11 | `audit_repo.close()` — drain in-flight writes, close the SQLite connection |
 
 The teardown hook executes whether the application shuts down gracefully (SIGTERM) or raises during request handling.
 
@@ -333,15 +452,18 @@ Stack traces and internal filesystem paths are suppressed to prevent information
 
 ```python
 app.include_router(health_router.router, prefix="/api/v1")
+app.include_router(query_router.router, prefix="/api/v1")
+app.include_router(ingestion_router.router, prefix="/api/v1")
+app.include_router(analytics_router.router, prefix="/api/v1")
 ```
 
-The health router declares its own `/health` prefix, producing the canonical path `GET /api/v1/health/`. All future routers will be registered under the same `/api/v1` versioning prefix.
+All routers are registered under the same `/api/v1` versioning prefix.
 
 ---
 
 ## 3. Test Suite Inventory
 
-All 33 tests pass with `pytest --asyncio-mode=auto`. No integration tests require live OpenAI credentials or a running ChromaDB server.
+All 105 tests pass with `pytest --asyncio-mode=auto`. No test requires live OpenAI credentials or a running ChromaDB server.
 
 ### `tests/unit/test_health.py` — 4 tests
 
@@ -430,6 +552,139 @@ All 33 tests pass with `pytest --asyncio-mode=auto`. No integration tests requir
 | `test_chunk_index_in_metadata_matches_id` | `metadata["chunk_index"]` equals the numeric suffix in `chunk_id` |
 | `test_document_id_in_metadata_matches_argument` | `metadata["document_id"]` equals the `document_id` argument |
 
+### `tests/unit/test_rag_prompts.py` — 17 tests
+
+**`TestBuildRagPromptStructure` (6)**
+
+| Test | What it verifies |
+|---|---|
+| `test_returns_exactly_two_messages` | `build_rag_prompt` returns a list with exactly two messages |
+| `test_first_message_role_is_system` | First message has `role == "system"` |
+| `test_second_message_role_is_user` | Second message has `role == "user"` |
+| `test_all_messages_have_content_key` | Both messages carry a non-empty `content` key |
+| `test_works_with_single_context` | Single-element context does not raise |
+| `test_works_with_empty_context_list` | Empty context does not raise |
+
+**`TestSystemPromptAntiHallucination` (5)**
+
+| Test | What it verifies |
+|---|---|
+| `test_system_prompt_contains_fallback_refusal_phrase` | `FALLBACK_REFUSAL_MESSAGE` appears verbatim in the system prompt |
+| `test_system_prompt_contains_citation_format` | `[Source:` and `Section:` markers are present |
+| `test_system_prompt_forbids_external_knowledge` | Explicit prohibition against using external knowledge |
+| `test_system_prompt_forbids_fabrication` | Explicit prohibition against fabricating facts |
+| `test_system_prompt_instructs_exclusive_context_use` | Model is instructed to answer exclusively from context |
+
+**`TestUserMessageContextFraming` (6)**
+
+| Test | What it verifies |
+|---|---|
+| `test_user_message_contains_begin_context_delimiter` | `--- BEGIN CONTEXT ---` is present |
+| `test_user_message_contains_end_context_delimiter` | `--- END CONTEXT ---` is present |
+| `test_begin_delimiter_precedes_end_delimiter` | BEGIN appears before END |
+| `test_query_is_present_in_user_message` | Original query string appears in user message |
+| `test_query_appears_after_end_context_delimiter` | Query follows the END delimiter |
+| `test_all_context_strings_present_in_user_message` | Every context string appears verbatim |
+
+### `tests/unit/test_token_counter.py` — 10 tests
+
+**`TestCountTokens` (4)**
+
+| Test | What it verifies |
+|---|---|
+| `test_count_tokens_matches_tiktoken` | Token count equals the reference `tiktoken cl100k_base` encode length |
+| `test_count_tokens_empty_string_returns_zero` | Empty string encodes to zero tokens |
+| `test_count_tokens_single_word` | Single common word produces exactly one token |
+| `test_count_tokens_custom_encoding` | Alternative encoding name loads correctly |
+
+**`TestFitContextsToBudget` (6)**
+
+| Test | What it verifies |
+|---|---|
+| `test_all_chunks_admitted_when_budget_is_ample` | All chunks admitted when combined count fits the budget |
+| `test_overflow_chunk_is_dropped` | A chunk exceeding the remaining budget is dropped |
+| `test_chunks_selected_in_descending_score_order` | Higher-scored chunks are admitted first |
+| `test_empty_input_returns_empty_list` | Empty input returns `[]` without raising |
+| `test_result_preserves_descending_score_ordering` | Returned list is sorted by descending score |
+| `test_zero_budget_drops_all_chunks` | `max_context_tokens=0` drops all chunks |
+
+### `tests/unit/test_rag_engine.py` — 12 tests
+
+**`TestRAGEngineQuery` (8)**
+
+| Test | What it verifies |
+|---|---|
+| `test_below_threshold_returns_fallback_without_completion_call` | No LLM call when no chunk meets the score threshold |
+| `test_below_threshold_logs_telemetry_with_zero_tokens` | Fallback path persists a `TelemetryRecord` with zero token counts |
+| `test_successful_retrieval_invokes_chat_completion` | Chat completions are called exactly once when chunks pass the threshold |
+| `test_successful_retrieval_returns_correct_citations` | Citations are extracted from the metadata of budgeted chunks |
+| `test_successful_retrieval_logs_audit_record` | A `TelemetryRecord` is persisted after a successful completion |
+| `test_successful_retrieval_populates_rag_result_fields` | `RAGResult` fields reflect the completion response and budgeted chunks |
+| `test_empty_similarity_search_returns_fallback` | Empty similarity search result triggers refusal |
+| `test_token_budget_is_applied_before_completion` | `fit_contexts_to_budget` is called with the filtered chunk list |
+
+**`TestRAGEngineStream` (4)**
+
+| Test | What it verifies |
+|---|---|
+| `test_stream_query_yields_fallback_when_no_chunks_pass_threshold` | Exactly the refusal phrase is yielded; LLM not called |
+| `test_stream_query_yields_tokens_sequentially` | Streaming tokens are yielded in the order they arrive |
+| `test_stream_query_skips_none_delta_content` | `None` delta content (role announcement chunk) is skipped |
+| `test_stream_query_empty_similarity_result_yields_fallback` | Empty similarity result triggers the stream fallback |
+
+### `tests/integration/test_api_query.py` — 9 tests
+
+| Test | What it verifies |
+|---|---|
+| `test_query_returns_200_with_valid_response` | HTTP 200 with well-formed `QueryResponse` |
+| `test_query_engine_called_with_correct_parameters` | Route forwards all parameters to `RAGEngine.query` |
+| `test_query_response_includes_citations` | Citations pass through verbatim from engine result |
+| `test_query_rejects_empty_query_string` | Empty `query` returns HTTP 422 |
+| `test_query_rejects_missing_query_field` | Missing `query` field returns HTTP 422 |
+| `test_query_rejects_top_k_below_minimum` | `top_k=0` returns HTTP 422 |
+| `test_query_rejects_top_k_above_maximum` | `top_k=21` returns HTTP 422 |
+| `test_query_rejects_extra_fields` | Unknown fields return HTTP 422 |
+| `test_query_token_usage_is_preserved` | `total_tokens` passes through without modification |
+
+### `tests/integration/test_api_analytics.py` — 9 tests
+
+| Test | What it verifies |
+|---|---|
+| `test_analytics_returns_200` | HTTP 200 on a valid request |
+| `test_analytics_returns_recent_records` | Records from repository appear verbatim in response |
+| `test_analytics_total_count_equals_records_length` | `total_count == len(records)` invariant |
+| `test_analytics_empty_audit_log_returns_empty_list` | Empty log returns `records=[]` and `total_count=0` |
+| `test_analytics_limit_parameter_is_forwarded` | `limit` query parameter is forwarded to `get_recent_logs` |
+| `test_analytics_default_limit_is_fifty` | Default `limit=50` is applied when omitted |
+| `test_analytics_rejects_limit_zero` | `limit=0` returns HTTP 422 |
+| `test_analytics_rejects_limit_above_maximum` | `limit=1001` returns HTTP 422 |
+| `test_analytics_record_fields_are_complete` | All `TelemetryRecord` fields are present in the serialised response |
+
+### `tests/integration/test_api_ingestion.py` — 8 tests
+
+| Test | What it verifies |
+|---|---|
+| `test_ingest_rejects_pdf_extension` | `.pdf` upload returns HTTP 415 |
+| `test_ingest_rejects_exe_extension` | `.exe` upload returns HTTP 415 |
+| `test_ingest_rejects_docx_extension` | `.docx` upload returns HTTP 415 |
+| `test_ingest_processes_md_file` | `.md` file returns HTTP 200 with `IngestResponse` |
+| `test_ingest_processes_txt_file` | `.txt` file returns HTTP 200 with `IngestResponse` |
+| `test_ingest_response_status_is_success` | `status == "success"` on the happy path |
+| `test_ingest_zero_chunks_for_empty_document` | Empty file returns HTTP 200 with `chunks_ingested=0` |
+| `test_ingest_pipeline_called_with_path_argument` | Pipeline receives a `Path` with the correct stem |
+
+### `tests/integration/test_api_stream.py` — 7 tests
+
+| Test | What it verifies |
+|---|---|
+| `test_stream_returns_text_event_stream_content_type` | Response has `Content-Type: text/event-stream` |
+| `test_stream_contains_done_sentinel` | Stream body includes the `[DONE]` termination sentinel |
+| `test_stream_sse_token_format` | Each token delta is wrapped in `data: {"token": "..."}\n\n` |
+| `test_stream_sse_events_are_valid_json` | All `data:` lines except `[DONE]` contain parseable JSON with a `token` key |
+| `test_stream_fallback_refusal_is_yielded` | Fallback refusal phrase appears in the stream body |
+| `test_stream_rejects_empty_query` | Empty `query` returns HTTP 422 before streaming begins |
+| `test_stream_engine_called_with_correct_parameters` | Route forwards all parameters to `stream_query` |
+
 ---
 
 ## 4. Architectural Decision Log
@@ -442,7 +697,7 @@ All 33 tests pass with `pytest --asyncio-mode=auto`. No integration tests requir
 
 **Consequences:**
 - The event loop remains unblocked during vector index operations.
-- Each `add_documents` and `similarity_search` call acquires a thread from the pool and releases it on completion. At very high concurrency, thread pool exhaustion is a potential bottleneck; this will be revisited in Sprint 4 with a configurable executor.
+- Each `add_documents` and `similarity_search` call acquires a thread from the pool and releases it on completion. At very high concurrency, thread pool exhaustion is a potential bottleneck; this will be revisited with a configurable executor.
 - The `_get_collection()` lazy-init coroutine first checks `self._collection is None` on the event loop thread (a pure Python check, zero I/O), then dispatches `_init_collection_sync` to a thread only when initialisation is actually needed. Subsequent calls skip the thread dispatch entirely.
 
 ---
@@ -485,3 +740,40 @@ All 33 tests pass with `pytest --asyncio-mode=auto`. No integration tests requir
 - A heading that falls mid-chunk is also captured — the last heading seen before the chunk's end is the nearest containing section, which is the correct attribution for the chunk's content.
 - If a document begins with a heading and has no preceding text, the first chunk's `section` metadata will correctly reflect that heading.
 - The trade-off is that the scan window is slightly larger than the strict "prefix only" approach, but the cost is a constant-time regex scan over a string slice — negligible relative to the `tiktoken` encode/decode operations.
+
+---
+
+### ADR-05 — Server-Sent Events Streaming Protocol with Proxy-Buffering Bypass
+
+**Context:** The `POST /api/v1/query/stream` endpoint must deliver incremental LLM token deltas to clients in real time. In typical enterprise deployments, the FastAPI service runs behind an nginx reverse proxy or a CDN edge layer. Without explicit header instructions, both nginx and most CDNs buffer the response body until either the connection closes or the buffer fills, negating the perceived latency benefit of streaming.
+
+**Decision:** Every `StreamingResponse` from the streaming query endpoint sets two headers unconditionally:
+
+```python
+"Cache-Control": "no-cache"
+"X-Accel-Buffering": "no"
+```
+
+`X-Accel-Buffering: no` is the nginx-specific directive that instructs the reverse proxy to flush each chunk to the client immediately rather than accumulating a buffer. `Cache-Control: no-cache` provides an RFC-standard equivalent signal for other intermediaries (CDNs, shared proxies) and prevents the event stream from being served from cache.
+
+The SSE event format follows the [WHATWG EventSource](https://html.spec.whatwg.org/multipage/server-sent-events.html) wire format: each event is a `data:` line terminated by two newlines (`\n\n`). Token deltas are JSON-encoded (`{"token": "<delta>"}`). The stream terminates with the explicit sentinel `data: [DONE]\n\n`, allowing clients to detect stream completion without relying on connection closure or a timeout.
+
+**Consequences:**
+- Clients consuming the stream via browser `EventSource` or any SSE-aware HTTP client receive token deltas with sub-second latency on the first token.
+- The `[DONE]` sentinel is an explicit application-level terminator, making client-side stream handling deterministic regardless of network conditions.
+- nginx deployments require no configuration changes; the `X-Accel-Buffering: no` header overrides any server-level `proxy_buffering on` directive.
+- For deployments that do not use nginx, `Cache-Control: no-cache` alone signals intermediaries not to buffer.
+
+---
+
+### ADR-06 — Single-Instance Lifespan Dependency Graph Shared Between Ingestion and Query Engines
+
+**Context:** Both `IngestionPipeline` and `RAGEngine` depend on the same `ChromaVectorStore`, `AsyncOpenAI` client, and `Settings` instance. A naïve FastAPI implementation might construct these dependencies fresh for every `Depends` resolution, resulting in multiple `chromadb.PersistentClient` handles open concurrently (which triggers file-locking conflicts) and multiple `AsyncOpenAI` instances that each maintain their own `httpx` connection pool (inflating file descriptor usage and TLS handshake overhead).
+
+**Decision:** All long-lived service instances — `SQLiteAuditRepository`, `ChromaVectorStore`, `AsyncOpenAI`, `TokenBudgetManager`, `RAGEngine`, and `IngestionPipeline` — are constructed exactly once inside the `@asynccontextmanager lifespan()` function and attached to `app.state` before the application begins accepting requests. Thin `Depends` factory functions in `src/api/dependencies.py` resolve these from `request.app.state` per request.
+
+**Consequences:**
+- A single `chromadb.PersistentClient` holds the exclusive write lock on the HNSW index throughout the application's lifetime.
+- A single `AsyncOpenAI` instance shares one `httpx.AsyncClient` and its underlying connection pool across all concurrent requests, reducing TLS handshake overhead and file descriptor usage under load.
+- Documents indexed via `POST /api/v1/ingest/file` are immediately queryable via `POST /api/v1/query/` without any cache invalidation, replica lag, or consistency delay — both paths share the same `ChromaVectorStore` instance.
+- `TokenBudgetManager` loads the `cl100k_base` tiktoken BPE vocabulary once and caches the `tiktoken.Encoding` object on the instance, avoiding repeated BPE vocabulary deserialisation across requests.

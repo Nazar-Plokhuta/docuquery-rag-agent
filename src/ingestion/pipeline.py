@@ -94,9 +94,7 @@ class IngestionPipeline:
 
         chunks = self._chunker.chunk_document(document_id, text)
         if not chunks:
-            logger.warning(
-                "Document %r produced zero chunks — nothing ingested.", file_path
-            )
+            logger.warning("Document %r produced zero chunks — nothing ingested.", file_path)
             return 0
 
         total_batches = (len(chunks) + _EMBEDDING_BATCH_SIZE - 1) // _EMBEDDING_BATCH_SIZE

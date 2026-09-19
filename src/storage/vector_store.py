@@ -111,9 +111,7 @@ class ChromaVectorStore(VectorStoreInterface):
         metadatas: list[dict[str, str | int]] = [dict(c.metadata) for c in chunks]
 
         def _add() -> None:
-            collection = asyncio.get_event_loop().run_until_complete(
-                self._get_collection()
-            )
+            collection = asyncio.get_event_loop().run_until_complete(self._get_collection())
             collection.add(
                 ids=ids,
                 documents=documents,
