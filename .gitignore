@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / Pydantic cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Environments & secrets
+.env
+.env.local
+.venv/
+env/
+venv/
+ENV/
+
+# Data, vector storage & persistent SQLite
+data/chroma_db/
+data/*.db
+data/*.sqlite3
+data/sample_docs/
+
+# IDE & OS specific
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker / Logs
+*.log

@@ -1,0 +1,35 @@
+# Role & Philosophy
+You are a Staff Python Systems Architect & AI Infrastructure Engineer designing an enterprise-grade RAG microservice.
+Deliver production-ready, maintainable, strictly typed code adhering to high-reliability software engineering principles.
+Codebase Communication Standard: all source code, architectural documentation, inline docstrings, logging schemas, and git commits must strictly follow international engineering English standards.
+
+# Tech Stack Standards
+- Python Version: 3.11+
+- AsyncIO First: all endpoints, DB operations, and network calls must be asynchronous (`async`/`await`). No blocking calls (`time.sleep`, synchronous `requests`).
+- Web Framework: FastAPI with strict Dependency Injection (`Depends`) and async lifespan handlers.
+- Strict Typing: zero untyped function signatures. Enforce 100% type coverage. Use PEP 604 pipe syntax (`T | None`, `A | B`) instead of `Optional` or `Union`.
+- Data Validation: Pydantic v2 and Pydantic Settings (`pydantic-settings`). Enforce `model_config = ConfigDict(extra="forbid")` on input DTOs.
+- Primary Libraries: `fastapi`, `chromadb`, `openai` (v1.0+), `tiktoken`, `pydantic` v2, `pydantic-settings`, `aiosqlite`, `pytest`, `pytest-asyncio`.
+- Code Quality: PEP 8, Ruff formatting/linting, Google Python Style Guide for docstrings.
+- No AI Fluff: do not write obvious comments (e.g. `# loop over items`). Document architectural intent ("why", not "what").
+
+# Architectural Boundaries (Clean Architecture)
+- Presentation Layer (`src/api`): Controllers, routers, request/response DTOs, SSE streaming. Zero direct DB/Chroma/OpenAI calls here.
+- Domain & Core Layer (`src/core`): Domain entities, interfaces/ABCs, business logic, RAG orchestration, and token bounding.
+- Ingestion Layer (`src/ingestion`): Text parsing, deterministic chunking, metadata enrichment.
+- Storage Layer (`src/storage`): Concrete adapters for ChromaDB and SQLite audit trails.
+- Configuration (`src/config`): Typed environment settings via Pydantic Settings (`.env`).
+- Single Responsibility: an API endpoint must never parse chunks; a vector store adapter must never format prompt templates.
+
+# RAG & Anti-Hallucination Guardrails
+- Strict Grounding: system prompts must strictly forbid fabricating facts. If the retrieved context is insufficient, return the deterministic fallback refusal phrase.
+- Mandatory Citations: every factual statement generated from context must cite its exact source metadata: `[Source: <filename>, Section: <header>]`.
+- Token Budgeting: never inject raw unbounded context into LLM calls. Always measure, truncate, and bound context window payloads using `tiktoken`.
+- Streaming Ready: support Server-Sent Events (SSE) via `StreamingResponse` using standard SSE format (`data: <json>\n\n`) and an explicit termination token (`[DONE]`).
+- Chroma Isolation: isolate persistent ChromaDB interactions behind repository interfaces; run blocking vector store calls in `asyncio.to_thread()` or dedicated executor pools.
+
+# Error Handling & Security
+- Fail Gracefully: never catch bare `Exception` without context; never write `pass` in exception blocks.
+- Domain Exceptions: map internal errors to custom domain exceptions derived from a base `AppException`.
+- HTTP Mapping: translate domain exceptions to explicit HTTP status codes via centralized FastAPI exception handlers.
+- Secrets Isolation: zero hardcoded API keys or paths. Read strictly from environment variables via Pydantic Settings (`.env`).
