@@ -5,6 +5,9 @@ Responsibilities:
 - FastAPI application instantiation with metadata and OpenAPI config.
 - Global exception handler translating ``AppException`` subclasses to clean
   JSON error envelopes with appropriate HTTP status codes.
+- Full service graph construction and ``app.state`` population inside the
+  lifespan context manager so every request reuses pre-initialised, long-lived
+  service instances without per-request reconnection overhead.
 - Router registration under the versioned ``/api/v1`` prefix.
 """
 
@@ -17,11 +20,20 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from openai import AsyncOpenAI
 
+from src.api.routes import analytics as analytics_router
 from src.api.routes import health as health_router
+from src.api.routes import ingestion as ingestion_router
+from src.api.routes import query as query_router
 from src.config.settings import get_settings
 from src.core.exceptions import AppException, ResourceNotFoundError, StorageError
+from src.core.rag.engine import RAGEngine
+from src.core.rag.token_counter import TokenBudgetManager
+from src.ingestion.chunker import TokenSlidingWindowChunker
+from src.ingestion.pipeline import IngestionPipeline
 from src.storage.audit_db import SQLiteAuditRepository
+from src.storage.vector_store import ChromaVectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +69,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Startup sequence:
     1. Configure root log level from settings.
     2. Provision required filesystem directories.
+    3. Initialise and connect the SQLite audit repository.
+    4. Construct the ChromaDB vector store adapter (lazy I/O — no network call
+       yet; the collection is opened on first actual read/write).
+    5. Construct the async OpenAI client.
+    6. Construct the token budget manager (loads tiktoken BPE vocabulary).
+    7. Assemble the ``RAGEngine`` with all injected dependencies.
+    8. Assemble the ``IngestionPipeline`` with chunker, vector store, and
+       OpenAI client.
+    9. Attach all services to ``app.state`` for DI resolution per request.
 
-    Shutdown is a no-op at this stage; teardown hooks for DB connections will
-    be added in subsequent sprints.
+    Shutdown:
+    - Close the SQLite connection, draining any in-flight writes.
+    - ChromaDB, OpenAI client, and tiktoken hold no persistent connections
+      requiring explicit teardown.
     """
     settings = get_settings()
     logging.basicConfig(level=settings.log_level)
@@ -71,13 +94,45 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     await _provision_directories()
 
-    # Initialise the SQLite audit schema and hold the connection for the
-    # application's lifetime.  Stored on ``app.state`` so Sprint 3 DI can
-    # resolve ``SQLiteAuditRepository`` from the request context without
-    # reopening the connection on every call.
+    # ── Storage layer ────────────────────────────────────────────────────────
+    # SQLite: open a single persistent connection for the application's entire
+    # lifetime (see ADR-02 in docs/internal/architecture.md).
     audit_repo = SQLiteAuditRepository(settings)
     await audit_repo.initialize_db()
     app.state.audit_repo = audit_repo
+
+    # ChromaDB: lazy-initialised adapter; no blocking I/O occurs here.
+    vector_store = ChromaVectorStore(settings)
+    app.state.vector_store = vector_store
+
+    # ── OpenAI client ────────────────────────────────────────────────────────
+    # A single ``AsyncOpenAI`` instance is reused across all requests to share
+    # the underlying httpx connection pool and avoid per-request TLS handshakes.
+    openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
+
+    # ── Domain / core layer ──────────────────────────────────────────────────
+    token_budget = TokenBudgetManager()
+
+    rag_engine = RAGEngine(
+        vector_store=vector_store,
+        audit_repo=audit_repo,
+        openai_client=openai_client,
+        token_budget=token_budget,
+        settings=settings,
+    )
+    app.state.rag_engine = rag_engine
+
+    # ── Ingestion layer ──────────────────────────────────────────────────────
+    chunker = TokenSlidingWindowChunker()
+    ingestion_pipeline = IngestionPipeline(
+        chunker=chunker,
+        vector_store=vector_store,
+        openai_client=openai_client,
+        settings=settings,
+    )
+    app.state.ingestion_pipeline = ingestion_pipeline
+
+    logger.info("All services initialised — application is ready to accept traffic.")
 
     yield  # Application is live and handling requests.
 
@@ -146,3 +201,6 @@ async def app_exception_handler(request: Request, exc: AppException) -> JSONResp
 # ---------------------------------------------------------------------------
 
 app.include_router(health_router.router, prefix="/api/v1")
+app.include_router(query_router.router, prefix="/api/v1")
+app.include_router(ingestion_router.router, prefix="/api/v1")
+app.include_router(analytics_router.router, prefix="/api/v1")
