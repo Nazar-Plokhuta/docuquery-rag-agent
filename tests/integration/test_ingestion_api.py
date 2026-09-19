@@ -20,6 +20,12 @@ def _minimal_docx_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _minimal_html_bytes() -> bytes:
+    return b"""<!DOCTYPE html>
+<html><head><title>Report</title></head>
+<body><h1>Report</h1><p>Sample HTML body for ingestion.</p></body></html>"""
+
+
 def _minimal_xlsx_bytes() -> bytes:
     workbook = Workbook()
     sheet = workbook.active
@@ -76,6 +82,26 @@ async def test_ingest_processes_docx_file(
     assert payload["status"] == "success"
     assert payload["filename"] == "report.docx"
     assert payload["chunks_ingested"] == 4
+
+
+@pytest.mark.asyncio
+async def test_ingest_processes_html_file(
+    integration_client: AsyncClient,
+    mock_ingestion_pipeline: AsyncMock,
+) -> None:
+    """``POST /api/v1/ingest/file`` must accept ``.html`` files and return HTTP 200."""
+    mock_ingestion_pipeline.ingest_document.return_value = 2
+
+    response = await integration_client.post(
+        "/api/v1/ingest/file",
+        files={"file": ("guide.html", _minimal_html_bytes(), "text/html")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["filename"] == "guide.html"
+    assert payload["chunks_ingested"] == 2
 
 
 @pytest.mark.asyncio
