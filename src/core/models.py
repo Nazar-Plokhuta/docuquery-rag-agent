@@ -8,7 +8,7 @@ members.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DocumentChunk(BaseModel):
@@ -46,6 +46,62 @@ class RetrievalResult(BaseModel):
 
     chunk: DocumentChunk
     score: float
+
+
+class Citation(BaseModel):
+    """Source attribution for a single factual claim in a RAG response.
+
+    Instances are produced by the RAG engine from the metadata of each
+    retrieved chunk that survived score filtering and token budgeting.
+
+    Attributes:
+        source: Document identifier — typically the file stem or filename
+            from which the chunk was derived.
+        section: Nearest preceding Markdown heading at ingestion time, or an
+            empty string when the chunk's source document contains no headings.
+        chunk_id: Deterministic chunk identifier in the form
+            ``{document_id}#c{index:04d}``, enabling exact traceability back
+            to the indexed segment.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source: str
+    section: str
+    chunk_id: str
+
+
+class RAGResult(BaseModel):
+    """Structured result of a completed non-streaming RAG query.
+
+    Carries the grounded answer, full source attribution, latency telemetry,
+    and token usage figures needed for cost attribution and observability.
+
+    Attributes:
+        query: The raw user query submitted to the RAG pipeline.
+        answer: The grounded LLM response text, or the deterministic fallback
+            refusal phrase when retrieved context is insufficient.
+        citations: Ordered list of source attributions derived from the
+            token-budgeted chunks used to build the LLM prompt.
+        latency_ms: End-to-end wall-clock duration in milliseconds, measured
+            from query embedding to response receipt.
+        prompt_tokens: Tokens consumed by the combined system and user prompt.
+        completion_tokens: Tokens generated in the LLM completion.
+        total_tokens: Sum of ``prompt_tokens`` and ``completion_tokens``.
+        retrieved_chunks_count: Number of chunks that survived score filtering
+            and token budgeting and were injected into the prompt.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    query: str
+    answer: str
+    citations: list[Citation] = Field(default_factory=list)
+    latency_ms: float
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    retrieved_chunks_count: int
 
 
 class TelemetryRecord(BaseModel):
