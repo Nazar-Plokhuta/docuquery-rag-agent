@@ -1,0 +1,79 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Hatchling cannot auto-detect the package because the source root is `src/`
+# and the project name uses hyphens.  Explicit declaration resolves the wheel
+# file-selection heuristic failure.
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[project]
+name = "docuquery-rag-agent"
+version = "0.1.0"
+description = "Enterprise-grade Retrieval-Augmented Generation microservice with document ingestion, vector search, and grounded LLM responses."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.8.0",
+    "pydantic-settings>=2.4.0",
+    "chromadb>=0.5.0",
+    "openai>=1.40.0",
+    "tiktoken>=0.7.0",
+    "aiosqlite>=0.20.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.6.0",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff — linting & formatting
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: isort, B: bugbear, UP: pyupgrade, SIM: simplify
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = [
+    # Allow assert statements in tests / internal guards
+    "B011",
+]
+
+# FastAPI's `Depends()`, `Security()`, and `Query()` are intentionally used as
+# default argument values — this is the canonical FastAPI DI pattern.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Security",
+    "fastapi.Header",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

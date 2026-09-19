@@ -1,0 +1,59 @@
+# ============================================================
+# DocuQuery RAG Agent — Docker Compose (local development)
+# ============================================================
+# Usage:
+#   docker compose up --build
+#
+# The `./data` directory on the host is bind-mounted so that ChromaDB vectors
+# and SQLite telemetry persist across container restarts without a named volume.
+# ============================================================
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: docuquery-api
+    image: docuquery-rag-agent:dev
+    restart: unless-stopped
+
+    ports:
+      - "${APP_PORT:-8000}:8000"
+
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_PORT: ${APP_PORT:-8000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY must be set in .env}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      CHROMA_PERSIST_DIRECTORY: /app/data/chroma_db
+      SQLITE_DATABASE_PATH: /app/data/telemetry.db
+
+    volumes:
+      # Persistent data: ChromaDB index and SQLite telemetry survive restarts.
+      - ./data:/app/data
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+    # Uvicorn reload flag is only meaningful during local dev; set via env override
+    # rather than hard-coding into the Dockerfile CMD so the production image
+    # remains unchanged.
+    command: >
+      uvicorn src.main:app
+        --host 0.0.0.0
+        --port 8000
+        --reload
+        --log-level ${LOG_LEVEL:-info}
