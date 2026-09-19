@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from src.api.routes import health as health_router
 from src.config.settings import get_settings
 from src.core.exceptions import AppException, ResourceNotFoundError, StorageError
+from src.storage.audit_db import SQLiteAuditRepository
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +71,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     await _provision_directories()
 
+    # Initialise the SQLite audit schema and hold the connection for the
+    # application's lifetime.  Stored on ``app.state`` so Sprint 3 DI can
+    # resolve ``SQLiteAuditRepository`` from the request context without
+    # reopening the connection on every call.
+    audit_repo = SQLiteAuditRepository(settings)
+    await audit_repo.initialize_db()
+    app.state.audit_repo = audit_repo
+
     yield  # Application is live and handling requests.
 
     logger.info("DocuQuery RAG Agent shutting down.")
+    await audit_repo.close()
 
 
 # ---------------------------------------------------------------------------
