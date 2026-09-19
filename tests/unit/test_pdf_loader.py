@@ -148,5 +148,5 @@ def test_factory_resolves_supported_extensions() -> None:
 
 
 def test_factory_raises_for_unsupported_extension() -> None:
-    with pytest.raises(UnsupportedFileTypeError, match=".docx"):
-        DocumentLoaderFactory.get_loader(".docx")
+    with pytest.raises(UnsupportedFileTypeError, match=".exe"):
+        DocumentLoaderFactory.get_loader(".exe")

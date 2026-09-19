@@ -1,7 +1,7 @@
 """Integration tests for ``POST /api/v1/ingest/file`` (document ingestion endpoint).
 
 Coverage:
-- HTTP 415 on unsupported file extensions (.exe, .docx).
+- HTTP 415 on unsupported file extensions (.exe).
 - HTTP 422 when no filename is included in the multipart upload.
 - HTTP 200 with valid ``IngestResponse`` for ``.md`` files.
 - HTTP 200 with valid ``IngestResponse`` for ``.txt`` files.
@@ -26,18 +26,6 @@ async def test_ingest_rejects_exe_extension(
     response = await integration_client.post(
         "/api/v1/ingest/file",
         files={"file": ("setup.exe", b"MZ binary", "application/octet-stream")},
-    )
-    assert response.status_code == 415
-
-
-@pytest.mark.asyncio
-async def test_ingest_rejects_docx_extension(
-    integration_client: AsyncClient,
-) -> None:
-    """``POST /api/v1/ingest/file`` must return HTTP 415 for ``.docx`` uploads."""
-    response = await integration_client.post(
-        "/api/v1/ingest/file",
-        files={"file": ("report.docx", b"PK binary", "application/vnd.openxmlformats")},
     )
     assert response.status_code == 415
 

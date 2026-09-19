@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ingest", tags=["Ingestion"])
 
 # Allowlist of accepted file extensions handled by ``DocumentLoaderFactory``.
-_ALLOWED_EXTENSIONS: frozenset[str] = frozenset({".md", ".txt", ".pdf"})
+_ALLOWED_EXTENSIONS: frozenset[str] = frozenset({".md", ".txt", ".pdf", ".docx"})
 
 
 @router.post(
@@ -39,7 +39,7 @@ _ALLOWED_EXTENSIONS: frozenset[str] = frozenset({".md", ".txt", ".pdf"})
     response_model=IngestResponse,
     summary="Ingest a document",
     description=(
-        "Upload a ``.md``, ``.txt``, or ``.pdf`` file. The service extracts text, "
+        "Upload a ``.md``, ``.txt``, ``.pdf``, or ``.docx`` file. The service extracts text, "
         "chunks, embeds, and indexes the content into the vector store, then returns "
         "the chunk count."
     ),

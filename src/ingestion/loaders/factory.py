@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.core.exceptions import UnsupportedFileTypeError
 from src.ingestion.loaders.base import BaseDocumentLoader
+from src.ingestion.loaders.docx import DocxDocumentLoader
 from src.ingestion.loaders.pdf import PdfDocumentLoader
 from src.ingestion.loaders.text import TextDocumentLoader
 
@@ -11,6 +14,7 @@ _SUPPORTED_EXTENSIONS: dict[str, type[BaseDocumentLoader]] = {
     ".txt": TextDocumentLoader,
     ".md": TextDocumentLoader,
     ".pdf": PdfDocumentLoader,
+    ".docx": DocxDocumentLoader,
 }
 
 
@@ -28,6 +32,8 @@ class DocumentLoaderFactory:
             UnsupportedFileTypeError: When no loader is registered for ``extension``.
         """
         normalized = extension.lower()
+        if not normalized.startswith("."):
+            normalized = Path(normalized).suffix.lower()
         loader_cls = _SUPPORTED_EXTENSIONS.get(normalized)
         if loader_cls is None:
             supported = ", ".join(sorted(_SUPPORTED_EXTENSIONS))
