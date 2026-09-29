@@ -1,0 +1,197 @@
+# Enterprise Service Level Agreement Policy
+
+**Document ID:** SLA-POL-2026-001  
+**Version:** 3.2  
+**Effective Date:** 2026-01-01  
+**Review Cycle:** Annual  
+**Owner:** Customer Success & Legal Operations  
+**Classification:** Customer-Facing — Confidential  
+
+---
+
+## 1. Purpose and Scope
+
+This Service Level Agreement (SLA) Policy defines the contractual uptime guarantees, incident response time obligations, support tier entitlements, and financial remedy terms applicable to all Enterprise and Business-tier subscribers of the DocuQuery Platform.
+
+This policy governs the following service components:
+
+- **DocuQuery API Gateway** — the primary REST and SSE interface consumed by client applications.
+- **Vector Search Infrastructure** — the HNSW-backed semantic retrieval layer.
+- **Document Ingestion Pipeline** — asynchronous chunking, embedding, and indexing services.
+- **Audit Telemetry Store** — the tamper-resistant query log exposed via the Analytics API.
+
+This policy does not govern free-tier or trial accounts, which operate under best-effort availability with no contractual SLA obligations.
+
+---
+
+## 2. SLA Tiers
+
+DocuQuery offers three contractual service tiers. Tier assignment is determined at contract signature and documented in the Order Form.
+
+### 2.1 Tier 1 — Enterprise Platinum
+
+**Target audience:** Mission-critical production deployments, regulated industries (finance, healthcare, legal), and clients with contractual downstream obligations.
+
+| Metric | Commitment |
+|---|---|
+| Monthly Uptime | **99.95%** (≤ 21.9 minutes downtime per month) |
+| API P99 Response Latency | ≤ 2 000 ms under standard load (≤ 500 concurrent users) |
+| Document Ingestion Throughput | ≤ 30 seconds per 100-page document |
+| Data Residency | Single-region isolation; region selectable at contract time |
+
+**Support channels:** Dedicated 24/7 Slack Connect channel, direct phone escalation line, named Customer Success Manager (CSM).
+
+**Initial Response Times:**
+
+| Severity | Definition | Response SLA |
+|---|---|---|
+| P0 — Service Outage | Complete API unavailability or data loss | **15 minutes** |
+| P1 — Degraded Service | >25% error rate or latency >5× baseline | **1 hour** |
+| P2 — Functional Impairment | Non-critical feature failure | **4 hours** |
+| P3 — Minor / Informational | Questions, cosmetic issues, enhancement requests | **1 business day** |
+
+---
+
+### 2.2 Tier 2 — Enterprise Standard
+
+**Target audience:** Production workloads with moderate uptime requirements, typically internal-facing applications where brief maintenance windows are acceptable.
+
+| Metric | Commitment |
+|---|---|
+| Monthly Uptime | **99.9%** (≤ 43.8 minutes downtime per month) |
+| API P99 Response Latency | ≤ 3 000 ms under standard load (≤ 200 concurrent users) |
+| Document Ingestion Throughput | ≤ 60 seconds per 100-page document |
+| Data Residency | Multi-region with cross-region failover |
+
+**Support channels:** Shared support portal (web + email), on-call escalation for P0/P1.
+
+**Initial Response Times:**
+
+| Severity | Definition | Response SLA |
+|---|---|---|
+| P0 — Service Outage | Complete API unavailability or data loss | **30 minutes** |
+| P1 — Degraded Service | >25% error rate or latency >5× baseline | **2 hours** |
+| P2 — Functional Impairment | Non-critical feature failure | **8 hours** |
+| P3 — Minor / Informational | Questions, cosmetic issues, enhancement requests | **2 business days** |
+
+---
+
+### 2.3 Tier 3 — Business
+
+**Target audience:** Development, staging, and low-volume production workloads where cost optimisation takes precedence over uptime guarantees.
+
+| Metric | Commitment |
+|---|---|
+| Monthly Uptime | **99.5%** (≤ 3.65 hours downtime per month) |
+| API P99 Response Latency | ≤ 5 000 ms under standard load (≤ 50 concurrent users) |
+| Document Ingestion Throughput | Best-effort; no contractual ceiling |
+| Data Residency | Shared infrastructure; region preference honoured where capacity permits |
+
+**Support channels:** Community forum, email support during business hours (09:00–18:00 UTC, Monday–Friday).
+
+**Initial Response Times:**
+
+| Severity | Definition | Response SLA |
+|---|---|---|
+| P0 — Service Outage | Complete API unavailability | **4 hours** |
+| P1 — Degraded Service | >25% error rate | **8 hours** |
+| P2 — Functional Impairment | Non-critical feature failure | **3 business days** |
+| P3 — Minor / Informational | All other inquiries | **5 business days** |
+
+---
+
+## 3. Uptime Measurement Methodology
+
+### 3.1 Definition of Availability
+
+Monthly Uptime Percentage is calculated as follows:
+
+```
+Monthly Uptime (%) = ((Total Minutes in Month − Downtime Minutes) / Total Minutes in Month) × 100
+```
+
+**Downtime** is defined as any continuous period of 5 minutes or longer during which the DocuQuery API Gateway returns HTTP 5xx responses for more than 50% of requests, as measured by the external uptime monitoring agent polling `GET /api/v1/health/` at 60-second intervals.
+
+### 3.2 Exclusions
+
+The following periods do not count toward Downtime for the purposes of SLA calculation:
+
+- Scheduled maintenance windows communicated via the status page at least 72 hours in advance.
+- Downtime attributable to client misuse, unauthorised modifications, or integration errors originating from the client's infrastructure.
+- Force majeure events: natural disasters, widespread internet infrastructure failures, or government-mandated service suspensions.
+- Third-party provider outages (e.g. OpenAI API unavailability) that are outside DocuQuery's direct control, provided DocuQuery activates its circuit-breaker fallback mode within 15 minutes of detecting the upstream failure.
+
+### 3.3 Status Page and Incident Communication
+
+Real-time service status is published at `status.docuquery.io`. Subscribers receive automated email and webhook notifications upon incident creation, status updates, and resolution.
+
+---
+
+## 4. Financial Remedy Terms (Service Credits)
+
+When Monthly Uptime falls below the contracted tier threshold, subscribers are entitled to Service Credits applied to future invoices. Credits are the sole and exclusive remedy for SLA breaches; they do not entitle the subscriber to monetary refunds.
+
+### 4.1 Tier 1 — Enterprise Platinum Credits
+
+| Achieved Monthly Uptime | Credit (% of Monthly Fee) |
+|---|---|
+| 99.90% – 99.94% | **10%** |
+| 99.50% – 99.89% | **25%** |
+| 99.00% – 99.49% | **50%** |
+| Below 99.00% | **100%** |
+
+### 4.2 Tier 2 — Enterprise Standard Credits
+
+| Achieved Monthly Uptime | Credit (% of Monthly Fee) |
+|---|---|
+| 99.50% – 99.89% | **10%** |
+| 99.00% – 99.49% | **25%** |
+| Below 99.00% | **50%** |
+
+### 4.3 Tier 3 — Business Credits
+
+| Achieved Monthly Uptime | Credit (% of Monthly Fee) |
+|---|---|
+| 99.00% – 99.49% | **5%** |
+| Below 99.00% | **15%** |
+
+### 4.4 Credit Request Procedure
+
+Subscribers must submit a credit request within 30 calendar days of the end of the affected service month. Requests are submitted via the customer portal and must include the affected time range and the incident reference number(s) from the status page. DocuQuery will evaluate and respond within 10 business days.
+
+---
+
+## 5. Data Retention and Portability
+
+### 5.1 Vector Index Retention
+
+Indexed document embeddings are retained for the full duration of the active subscription. Upon contract termination or non-renewal:
+
+- **Enterprise Platinum:** 90-day data retention window post-termination; vectorised data export available in JSON Lines format on request.
+- **Enterprise Standard:** 60-day retention window; self-service export via the Admin API.
+- **Business:** 30-day retention window; no export capability; data is deleted after the window expires.
+
+### 5.2 Audit Telemetry Retention
+
+Query telemetry logs (stored in the SQLite audit trail) are retained for 24 months for Enterprise Platinum subscribers and 12 months for Enterprise Standard and Business tiers, to support compliance, cost attribution, and audit requirements.
+
+---
+
+## 6. Escalation and Governance
+
+### 6.1 Escalation Path
+
+| Stage | Contact | Trigger |
+|---|---|---|
+| Level 1 | Support Portal / CSM | Initial incident report |
+| Level 2 | Engineering On-Call Lead | P0/P1 unresolved > 30 minutes |
+| Level 3 | VP of Engineering | P0 unresolved > 2 hours or significant data-loss risk |
+| Level 4 | C-Suite | Reputational risk, regulatory notification required |
+
+### 6.2 SLA Review and Amendment
+
+This policy is reviewed annually. DocuQuery reserves the right to amend SLA terms with 60 days' written notice. Subscribers on multi-year contracts are grandfathered at the SLA terms in effect at their contract signature date for the duration of the term.
+
+---
+
+*Document end — SLA-POL-2026-001 v3.2*

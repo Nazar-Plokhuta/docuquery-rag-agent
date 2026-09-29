@@ -18,7 +18,6 @@ ENV/
 data/chroma_db/
 data/*.db
 data/*.sqlite3
-data/sample_docs/
 
 # IDE & OS specific
 .DS_Store
