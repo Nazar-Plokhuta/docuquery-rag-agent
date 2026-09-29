@@ -1,14 +1,9 @@
 # DocuQuery RAG Agent
 
-![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=flat-square&logo=fastapi&logoColor=white)
-[![CI Pipeline](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/actions/workflows/ci.yml)
-![Tests](https://img.shields.io/badge/Tests-160%20Passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)
-![Formats](https://img.shields.io/badge/Formats-PDF%20%7C%20DOCX%20%7C%20XLSX%20%7C%20CSV%20%7C%20HTML%20%7C%20MD-informational?style=flat-square)
-![Ruff](https://img.shields.io/badge/Linting-Ruff-D7FF64?style=flat-square)
-![LLM Gateway](https://img.shields.io/badge/Gateway-OpenAI%20%7C%20OpenRouter-blueviolet?style=flat-square)
-![Docker Ready](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square)
+[![Release](https://img.shields.io/badge/RELEASE-V1.1.0-blue?style=for-the-badge&logo=github)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/releases)
+[![CI Pipeline](https://img.shields.io/badge/CI%20PIPELINE-PASSING-brightgreen?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/PYTHON-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Tests](https://img.shields.io/badge/TESTS-160%20PASSING-44cc11?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent)
 
 > **Enterprise-grade Retrieval-Augmented Generation microservice.** Strict grounding. Zero hallucinations. Full async. Production-ready from day one.
 
