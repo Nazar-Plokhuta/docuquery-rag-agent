@@ -10,7 +10,7 @@ packages = ["src"]
 
 [project]
 name = "docuquery-rag-agent"
-version = "0.1.0"
+version = "1.2.0"
 description = "Enterprise-grade Retrieval-Augmented Generation microservice with document ingestion, vector search, and grounded LLM responses."
 readme = "README.md"
 requires-python = ">=3.11"

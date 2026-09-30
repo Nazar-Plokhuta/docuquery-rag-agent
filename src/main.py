@@ -192,7 +192,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="DocuQuery RAG Agent API",
-    version="0.1.0",
+    version="1.2.0",
     description=(
         "Enterprise-grade Retrieval-Augmented Generation service providing "
         "document ingestion, semantic search, and grounded LLM responses."

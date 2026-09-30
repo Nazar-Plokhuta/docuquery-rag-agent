@@ -1,6 +1,6 @@
 # DocuQuery RAG Agent
 
-[![Release](https://img.shields.io/badge/RELEASE-V1.1.0-blue?style=for-the-badge&logo=github)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/releases)
+[![Release](https://img.shields.io/badge/RELEASE-V1.2.0-blue?style=for-the-badge&logo=github)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/releases/tag/v1.2.0)
 [![CI Pipeline](https://img.shields.io/badge/CI%20PIPELINE-PASSING-brightgreen?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/PYTHON-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Tests](https://img.shields.io/badge/TESTS-160%20PASSING-44cc11?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent)
@@ -197,6 +197,16 @@ uvicorn src.main:app --reload --port 8000
 # Root path / → automatically redirects to /api/docs
 ```
 
+### Interactive Terminal Showcase
+
+With the API listening on port 8000, run the human-paced pipeline walkthrough locally:
+
+```bash
+python scripts/demo_runner.py
+```
+
+The script drives health, ingestion, a grounded query, refusal, and analytics through Rich console panels and HTTPX. The same flow is recorded by `demo.tape` into `docs/assets/demo.gif`.
+
 ---
 
 ## API Reference
@@ -213,7 +223,7 @@ curl -s http://localhost:8000/api/v1/health/ | jq
 {
   "status": "ok",
   "app_name": "DocuQuery RAG Agent",
-  "version": "0.1.0",
+  "version": "1.2.0",
   "environment": "development"
 }
 ```
@@ -439,6 +449,9 @@ pytest tests/integration/
 
 # Run offline multi-format loader smoke verification
 python scripts/verify_all_loaders.py
+
+# Run the interactive terminal showcase (server must already be listening)
+python scripts/demo_runner.py
 ```
 
 All tests are fully isolated: no live OpenAI credentials, no running ChromaDB server, and no network access are required. Mocks cover all external boundaries.
@@ -528,11 +541,13 @@ docuquery-rag-agent/
 │   └── sample_docs/     # Enterprise sample documents for testing and demos
 ├── scripts/
 │   ├── smoke_test.py           # Async E2E smoke test script (httpx)
-│   └── verify_all_loaders.py   # Offline loader verification suite
+│   ├── verify_all_loaders.py   # Offline loader verification suite
+│   └── demo_runner.py          # Standalone human-paced terminal pipeline showcase (Rich + HTTPX)
 ├── docs/
 │   └── internal/
 │       ├── architecture.md  # Authoritative architecture reference + ADR log
 │       └── state.md         # Living implementation state + test inventory
+├── demo.tape            # VHS tape automation for the documentation GIF
 ├── Dockerfile           # Multi-stage production image (non-root, slim)
 ├── docker-compose.yml   # Local development compose with bind-mounted data volume
 ├── pyproject.toml       # Project metadata, dependencies, Ruff, and Pytest config

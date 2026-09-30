@@ -1,7 +1,7 @@
 # DocuQuery RAG Agent — Architecture Reference
 
-**Version:** 0.1.0  
-**Status:** Authoritative — reflects implementation state as of Sprint 5 completion  
+**Version:** 1.2.0  
+**Status:** Authoritative — reflects implementation state as of Sprint 6 (v1.2.0)  
 **Audience:** Internal engineering team  
 
 ---
@@ -93,6 +93,14 @@ Storage adapters must never format response payloads for API consumers or parse 
 
 All endpoints use FastAPI `Depends` for service injection. Zero direct calls to ChromaDB, SQLite, or OpenAI are permitted inside routers.
 
+### 2.6 Composition root (`src/main.py`)
+
+**Sole responsibility:** Assemble the dependency graph once during the lifespan and expose a single logging surface for the process.
+
+`_configure_logging()` is the first lifespan step. It installs one `rich.logging.RichHandler` on the root logger (`rich_tracebacks=True`, `show_path=False`, `markup=True`, `log_time_format="[%X]"`) through `logging.basicConfig(..., force=True)`. `force=True` replaces any handler already attached to the root logger, including handlers left by a reloader or an earlier import.
+
+Uvicorn installs its own handlers and disables propagation before the lifespan runs. The helper clears those handlers on `uvicorn`, `uvicorn.error`, and `uvicorn.access`, sets `propagate = True`, and aligns each logger's level with `Settings.log_level`. Application domain logs and Uvicorn server/access logs then share one timestamped Rich layout, without the concatenated `INFO:logger:` prefix.
+
 ---
 
 ## 3. API Endpoint Reference
@@ -103,7 +111,7 @@ All endpoints are served under the `/api/v1` versioning prefix. OpenAPI document
 
 **Purpose:** Liveness probe for load balancers, orchestrators, and monitoring systems.  
 **Auth:** None.  
-**Response:** `HealthResponse` — `status`, `app_name`, `version`, `environment`.  
+**Response:** `HealthResponse` — `status`, `app_name`, `version` (`1.2.0`), `environment`.  
 **Side effects:** None. Does not probe downstream dependencies (DB, vector store, LLM).
 
 ### 3.2 `POST /api/v1/query/`
@@ -133,9 +141,9 @@ data: [DONE]\n\n                       — explicit stream termination sentinel
 
 ### 3.4 `POST /api/v1/ingest/file`
 
-**Purpose:** Upload, chunk, embed, and index a plain-text document.  
+**Purpose:** Upload, chunk, embed, and index a supported document.  
 **Auth:** None.  
-**Request:** `multipart/form-data` with a single `file` field. Accepted extensions: `.md`, `.txt`. All other extensions return HTTP 415.  
+**Request:** `multipart/form-data` with a single `file` field. Accepted extensions: `.md`, `.txt`, `.pdf`, `.docx`, `.csv`, `.xlsx`, `.html`, `.htm`. All other extensions return HTTP 415.  
 **Response:** `IngestResponse` — `status` (`"success"`), `filename`, `chunks_ingested`.  
 **Lifecycle:** Content is written to a temporary directory (preserving the original filename so `document_id` is derived from the stem), delegated to `IngestionPipeline`, and the temporary directory is deleted unconditionally in a `finally` block.  
 **Edge case:** An empty file produces zero chunks and returns HTTP 200 (`chunks_ingested: 0`).
@@ -228,7 +236,7 @@ Typed liveness probe payload, defined in `src/api/routes/health.py` rather than 
 |---|---|---|
 | `status` | `str` | Always `"ok"` while the process is alive |
 | `app_name` | `str` | Human-readable service name |
-| `version` | `str` | SemVer application version |
+| `version` | `str` | SemVer application version. Current release: `1.2.0` |
 | `environment` | `str` | Active `app_env` value from settings (`development`, `staging`, `production`) |
 
 ---
@@ -277,6 +285,15 @@ The only explicit index is the `PRIMARY KEY` on `request_id`, which SQLite imple
 ### 5.4 Connection Strategy
 
 `SQLiteAuditRepository` opens a **single persistent `aiosqlite.Connection`** for the application's lifetime. This is the only strategy compatible with in-memory databases (`":memory:"`), where each new `aiosqlite.connect(":memory:")` call produces a completely isolated, empty database. The persistent connection is stored on `app.state.audit_repo` and closed in the lifespan shutdown hook.
+
+### 5.5 Runtime Logging
+
+The `query_telemetry` table is the durable audit trail. Process stdout is a separate channel and is never written into that table.
+
+At lifespan startup, `_configure_logging()` in `src/main.py` routes both log streams through one `rich.logging.RichHandler`:
+
+- Application domain loggers (for example `src.main`) inherit the root handler installed by `logging.basicConfig(..., force=True)`.
+- Uvicorn server and access loggers — `uvicorn`, `uvicorn.error`, and `uvicorn.access` — have their default handlers cleared and `propagate` set to `True`, so access lines use the same timestamped Rich layout as domain logs.
 
 ---
 

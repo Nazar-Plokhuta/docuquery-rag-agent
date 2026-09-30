@@ -1,9 +1,9 @@
 # DocuQuery RAG Agent — Living Implementation State
 
-**Version:** 0.1.0  
-**Sprint:** 5 (complete)  
-**Test suite:** 105 tests — all passing  
-**Last updated:** 2026-09-19  
+**Version:** 1.2.0  
+**Sprint:** 6 (complete)  
+**Test suite:** 160 tests — all passing  
+**Last updated:** 2026-09-30  
 
 > This document is a living record. Update it whenever a sprint closes or an ADR is ratified.
 
@@ -39,6 +39,7 @@
 | Sprint 3 | `RAGEngine` (non-streaming query), `TokenBudgetManager`, `build_rag_prompt`, anti-hallucination system prompt, `Citation` and `RAGResult` domain models, `POST /api/v1/query/` endpoint, audit telemetry logging | Complete |
 | Sprint 4 | SSE streaming query (`POST /api/v1/query/stream`), document ingestion endpoint (`POST /api/v1/ingest/file`), analytics endpoint (`GET /api/v1/analytics/recent`), full 105-test suite | Complete |
 | Sprint 5 | `docs/internal/architecture.md` update (endpoints, ADR-05, ADR-06), enterprise sample datasets (`data/sample_docs/`), E2E smoke test script (`scripts/smoke_test.py`), B2B showcase `README.md` | Complete |
+| Sprint 6 | Interactive terminal demo runner (`scripts/demo_runner.py`) using Rich console panels and `httpx`; VHS tape automation (`demo.tape`) producing a zero-artifact documentation GIF; multi-format enterprise sample documents (`data/sample_docs/sla_policy.docx`, `sla_matrix.csv`, `sla_matrix.xlsx`); standardized logging with `RichHandler` and LF normalization via `.gitattributes`. Release `v1.2.0` | Complete |
 
 ---
 
@@ -409,11 +410,11 @@ Delegates to `AuditRepositoryInterface.get_recent_logs(limit)` and wraps the res
 
 #### Lifespan Startup/Teardown Sequence
 
-The `@asynccontextmanager` lifespan function controls the full application boot:
+The `@asynccontextmanager` lifespan function controls the full application boot. Step 1 calls `_configure_logging()`, which installs a `rich.logging.RichHandler` for application domain logs and for the intercepted Uvicorn loggers (`uvicorn`, `uvicorn.error`, `uvicorn.access`).
 
 | Step | Action |
 |---|---|
-| 1 | `logging.basicConfig(level=settings.log_level)` — configure root logger from settings |
+| 1 | `_configure_logging(settings.log_level)` — install a single `rich.logging.RichHandler` on the root logger and intercept `uvicorn`, `uvicorn.error`, and `uvicorn.access` so domain logs and server/access logs share one layout |
 | 2 | `_provision_directories()` — idempotent `mkdir(parents=True, exist_ok=True)` for `chroma_persist_directory` and `sqlite_database_path` parent |
 | 3 | `SQLiteAuditRepository(settings).initialize_db()` — open persistent connection, create schema |
 | 4 | `app.state.audit_repo = audit_repo` — attach to application state for downstream DI |
@@ -463,7 +464,7 @@ All routers are registered under the same `/api/v1` versioning prefix.
 
 ## 3. Test Suite Inventory
 
-All 105 tests pass with `pytest --asyncio-mode=auto`. No test requires live OpenAI credentials or a running ChromaDB server.
+All 160 tests pass with `pytest --asyncio-mode=auto`. No test requires live OpenAI credentials or a running ChromaDB server.
 
 ### `tests/unit/test_health.py` — 4 tests
 
@@ -608,9 +609,9 @@ All 105 tests pass with `pytest --asyncio-mode=auto`. No test requires live Open
 | `test_result_preserves_descending_score_ordering` | Returned list is sorted by descending score |
 | `test_zero_budget_drops_all_chunks` | `max_context_tokens=0` drops all chunks |
 
-### `tests/unit/test_rag_engine.py` — 12 tests
+### `tests/unit/test_rag_engine.py` — 13 tests
 
-**`TestRAGEngineQuery` (8)**
+**`TestRAGEngineQuery` (9)**
 
 | Test | What it verifies |
 |---|---|
@@ -621,6 +622,7 @@ All 105 tests pass with `pytest --asyncio-mode=auto`. No test requires live Open
 | `test_successful_retrieval_logs_audit_record` | A `TelemetryRecord` is persisted after a successful completion |
 | `test_successful_retrieval_populates_rag_result_fields` | `RAGResult` fields reflect the completion response and budgeted chunks |
 | `test_empty_similarity_search_returns_fallback` | Empty similarity search result triggers refusal |
+| `test_llm_refusal_returns_empty_citations` | LLM refusal phrase returns an empty citation list |
 | `test_token_budget_is_applied_before_completion` | `fit_contexts_to_budget` is called with the filtered chunk list |
 
 **`TestRAGEngineStream` (4)**
@@ -660,13 +662,11 @@ All 105 tests pass with `pytest --asyncio-mode=auto`. No test requires live Open
 | `test_analytics_rejects_limit_above_maximum` | `limit=1001` returns HTTP 422 |
 | `test_analytics_record_fields_are_complete` | All `TelemetryRecord` fields are present in the serialised response |
 
-### `tests/integration/test_api_ingestion.py` — 8 tests
+### `tests/integration/test_api_ingestion.py` — 6 tests
 
 | Test | What it verifies |
 |---|---|
-| `test_ingest_rejects_pdf_extension` | `.pdf` upload returns HTTP 415 |
 | `test_ingest_rejects_exe_extension` | `.exe` upload returns HTTP 415 |
-| `test_ingest_rejects_docx_extension` | `.docx` upload returns HTTP 415 |
 | `test_ingest_processes_md_file` | `.md` file returns HTTP 200 with `IngestResponse` |
 | `test_ingest_processes_txt_file` | `.txt` file returns HTTP 200 with `IngestResponse` |
 | `test_ingest_response_status_is_success` | `status == "success"` on the happy path |
@@ -684,6 +684,104 @@ All 105 tests pass with `pytest --asyncio-mode=auto`. No test requires live Open
 | `test_stream_fallback_refusal_is_yielded` | Fallback refusal phrase appears in the stream body |
 | `test_stream_rejects_empty_query` | Empty `query` returns HTTP 422 before streaming begins |
 | `test_stream_engine_called_with_correct_parameters` | Route forwards all parameters to `stream_query` |
+
+### `tests/unit/test_pdf_loader.py` — 12 tests
+
+| Test | What it verifies |
+|---|---|
+| `test_public_exports_include_pdf_loader` | Public package export is `PdfDocumentLoader` |
+| `test_text_loader_decodes_utf8` | Text loader decodes UTF-8 bytes and records the file stem as source |
+| `test_text_loader_replaces_invalid_utf8_sequences` | Invalid UTF-8 sequences decode without raising |
+| `test_pdf_loader_injects_page_headings` | Extracted pages are prefixed with `## Page {n}` headings |
+| `test_pdf_loader_skips_empty_pages` | Blank pages are omitted from the extracted body |
+| `test_pdf_loader_rejects_encrypted_pdf` | Encrypted PDFs raise `DocumentParsingError` |
+| `test_pdf_loader_corrupted_pdf_maps_to_document_parsing_error` | Unreadable PDFs map to `DocumentParsingError` |
+| `test_pdf_loader_rejects_all_empty_pages` | A PDF with no readable pages raises `DocumentParsingError` |
+| `test_pdf_loader_rejects_empty_file_bytes` | Empty file bytes raise `DocumentParsingError` |
+| `test_pdf_page_headings_map_to_chunk_sections` | Page headings become chunk `section` metadata |
+| `test_factory_resolves_supported_extensions` | Factory resolves `.pdf`, `.md`, and `.txt` |
+| `test_factory_raises_for_unsupported_extension` | Unsupported extensions raise `UnsupportedFileTypeError` |
+
+### `tests/unit/test_docx_loader.py` — 7 tests
+
+| Test | What it verifies |
+|---|---|
+| `test_public_exports_include_docx_loader` | Public package export is `DocxDocumentLoader` |
+| `test_docx_loader_extracts_headings_paragraphs_and_tables` | Headings, paragraphs, and tables are extracted |
+| `test_docx_loader_rejects_empty_file_bytes` | Empty file bytes raise `DocumentParsingError` |
+| `test_docx_loader_rejects_corrupted_docx` | Corrupt DOCX bytes raise `DocumentParsingError` |
+| `test_docx_loader_rejects_docx_with_no_extractable_text` | A DOCX with no body text raises `DocumentParsingError` |
+| `test_docx_heading_maps_to_chunk_section_metadata` | Heading text becomes chunk `section` metadata |
+| `test_factory_resolves_docx_from_filename` | Factory resolves `.docx` filenames |
+
+### `tests/unit/test_csv_loader.py` — 6 tests
+
+| Test | What it verifies |
+|---|---|
+| `test_public_exports_include_csv_loader` | Public package export is `CsvDocumentLoader` |
+| `test_csv_loader_renders_markdown_table` | Rows render as a Markdown table under a CSV heading |
+| `test_csv_loader_handles_semicolon_delimiter` | Semicolon-delimited files are sniffed and rendered |
+| `test_csv_loader_rejects_empty_file` | Empty file bytes raise `DocumentParsingError` |
+| `test_csv_loader_rejects_file_with_no_rows` | A header-only or empty table raises `DocumentParsingError` |
+| `test_factory_resolves_csv_from_filename` | Factory resolves `.csv` filenames |
+
+### `tests/unit/test_excel_loader.py` — 7 tests
+
+| Test | What it verifies |
+|---|---|
+| `test_public_exports_include_excel_loader` | Public package export is `ExcelDocumentLoader` |
+| `test_excel_loader_extracts_visible_sheets_as_markdown` | Visible sheets render as Markdown tables |
+| `test_excel_loader_rejects_empty_workbook` | A workbook with no rows raises `DocumentParsingError` |
+| `test_excel_loader_rejects_corrupt_file` | Corrupt XLSX bytes raise `DocumentParsingError` |
+| `test_excel_loader_rejects_empty_file_bytes` | Empty file bytes raise `DocumentParsingError` |
+| `test_excel_sheet_heading_maps_to_chunk_section_metadata` | Sheet headings become chunk `section` metadata |
+| `test_factory_resolves_xlsx_from_filename` | Factory resolves `.xlsx` filenames |
+
+### `tests/unit/test_html_loader.py` — 7 tests
+
+| Test | What it verifies |
+|---|---|
+| `test_public_exports_include_html_loader` | Public package export is `HtmlDocumentLoader` |
+| `test_html_loader_strips_script_style_and_preserves_headings` | Script, style, nav, and footer noise is stripped; headings remain |
+| `test_html_heading_maps_to_chunk_section_metadata` | Heading text becomes chunk `section` metadata |
+| `test_html_loader_uses_title_when_no_h1` | The document title is used when no `h1` is present |
+| `test_html_loader_rejects_empty_file_bytes` | Empty file bytes raise `DocumentParsingError` |
+| `test_html_loader_rejects_whitespace_only_html` | Markup with no body text raises `DocumentParsingError` |
+| `test_factory_resolves_html_and_htm_from_filename` | Factory resolves `.html` and `.htm` filenames |
+
+### `tests/unit/test_settings.py` — 12 tests
+
+**`TestOpenAIBaseUrl` (6)**
+
+| Test | What it verifies |
+|---|---|
+| `test_defaults_to_none_when_not_supplied` | `openai_base_url` is `None` when unset |
+| `test_accepts_openrouter_url` | An OpenRouter base URL is stored unchanged |
+| `test_accepts_arbitrary_openai_compatible_url` | vLLM and LocalAI base URLs are accepted |
+| `test_env_var_name_is_openai_base_url` | The field resolves from `OPENAI_BASE_URL` |
+| `test_none_is_preserved_when_env_var_absent` | Removing the env var leaves the field as `None` |
+| `test_kwarg_takes_precedence_over_none_default` | An explicit kwarg overrides the `None` default |
+
+**`TestSettingsFieldRegressions` (6)**
+
+| Test | What it verifies |
+|---|---|
+| `test_openai_model_default` | `openai_model` defaults to `gpt-4o-mini` |
+| `test_embedding_model_default` | `embedding_model` defaults to `text-embedding-3-small` |
+| `test_app_env_default` | `app_env` defaults to `development` |
+| `test_app_port_default` | `app_port` defaults to `8000` |
+| `test_log_level_default` | `log_level` defaults to `INFO` |
+| `test_openai_base_url_defaults_to_none` | Default configuration keeps `openai_base_url` as `None` |
+
+### `tests/integration/test_ingestion_api.py` — 5 tests
+
+| Test | What it verifies |
+|---|---|
+| `test_ingest_processes_pdf_file` | `.pdf` upload returns HTTP 200 with `IngestResponse` |
+| `test_ingest_processes_docx_file` | `.docx` upload returns HTTP 200 with `IngestResponse` |
+| `test_ingest_processes_html_file` | `.html` upload returns HTTP 200 with `IngestResponse` |
+| `test_ingest_processes_csv_file` | `.csv` upload returns HTTP 200 with `IngestResponse` |
+| `test_ingest_processes_xlsx_file` | `.xlsx` upload returns HTTP 200 with `IngestResponse` |
 
 ---
 

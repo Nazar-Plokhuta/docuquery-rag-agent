@@ -34,7 +34,7 @@ async def test_health_response_payload(async_client: AsyncClient) -> None:
 
     assert payload["status"] == "ok"
     assert payload["app_name"] == "DocuQuery RAG Agent"
-    assert payload["version"] == "0.1.0"
+    assert payload["version"] == "1.2.0"
     # Environment is driven by the test ``Settings`` override.
     assert payload["environment"] == "development"
 
