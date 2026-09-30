@@ -19,5 +19,6 @@
 *.xlsx binary
 *.png binary
 *.jpg binary
+*.gif binary
 *.db binary
 *.sqlite3 binary

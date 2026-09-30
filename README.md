@@ -7,6 +7,10 @@
 
 > **Enterprise-grade Retrieval-Augmented Generation microservice.** Strict grounding. Zero hallucinations. Full async. Production-ready from day one.
 
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="DocuQuery RAG Agent Pipeline Demo" width="100%">
+</p>
+
 ---
 
 ## The Problem With Naive RAG in Enterprise B2B

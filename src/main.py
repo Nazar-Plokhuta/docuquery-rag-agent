@@ -21,6 +21,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from openai import AsyncOpenAI
+from rich.logging import RichHandler
 
 from src.api.routes import analytics as analytics_router
 from src.api.routes import health as health_router
@@ -42,6 +43,37 @@ from src.storage.audit_db import SQLiteAuditRepository
 from src.storage.vector_store import ChromaVectorStore
 
 logger = logging.getLogger(__name__)
+
+_UVICORN_LOGGERS: tuple[str, ...] = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
+def _configure_logging(level: str) -> None:
+    """Route application and Uvicorn logs through a single ``RichHandler``.
+
+    Uvicorn attaches its own handlers and disables propagation before the
+    lifespan runs. Clearing those handlers and propagating to the root logger
+    removes the concatenated ``INFO:logger:`` prefix so every line shares one
+    timestamped, colored layout. ``force=True`` replaces any handler already
+    installed on the root logger.
+    """
+    handler = RichHandler(
+        rich_tracebacks=True,
+        show_path=False,
+        markup=True,
+        log_time_format="[%X]",
+    )
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[handler],
+        force=True,
+    )
+    for logger_name in _UVICORN_LOGGERS:
+        named_logger = logging.getLogger(logger_name)
+        named_logger.handlers.clear()
+        named_logger.propagate = True
+        named_logger.setLevel(level)
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +107,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage application startup and graceful shutdown.
 
     Startup sequence:
-    1. Configure root log level from settings.
+    1. Configure root and Uvicorn logging through ``RichHandler``.
     2. Provision required filesystem directories.
     3. Initialise and connect the SQLite audit repository.
     4. Construct the ChromaDB vector store adapter (lazy I/O — no network call
@@ -93,7 +125,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
       requiring explicit teardown.
     """
     settings = get_settings()
-    logging.basicConfig(level=settings.log_level)
+    _configure_logging(settings.log_level)
     logger.info(
         "DocuQuery RAG Agent starting — env=%s port=%d",
         settings.app_env,
