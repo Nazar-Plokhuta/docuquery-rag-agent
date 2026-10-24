@@ -1,6 +1,6 @@
 """Analytics router: telemetry audit log retrieval endpoint.
 
-Exposes the SQLite audit trail to API consumers for observability, cost
+Exposes the audit trail to API consumers for observability, cost
 attribution, and compliance reporting.  The router depends exclusively on
 ``AuditRepositoryInterface`` — no direct database or ORM access occurs here.
 """

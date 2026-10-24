@@ -9,7 +9,7 @@ Codebase Communication Standard: all source code, architectural documentation, i
 - Web Framework: FastAPI with strict Dependency Injection (`Depends`) and async lifespan handlers.
 - Strict Typing: zero untyped function signatures. Enforce 100% type coverage. Use PEP 604 pipe syntax (`T | None`, `A | B`) instead of `Optional` or `Union`.
 - Data Validation: Pydantic v2 and Pydantic Settings (`pydantic-settings`). Enforce `model_config = ConfigDict(extra="forbid")` on input DTOs.
-- Primary Libraries: `fastapi`, `chromadb`, `openai` (v1.0+), `tiktoken`, `pydantic` v2, `pydantic-settings`, `aiosqlite`, `pytest`, `pytest-asyncio`.
+- Primary Libraries: `fastapi`, `chromadb`, `openai` (v1.0+), `tiktoken`, `pydantic` v2, `pydantic-settings`, `sqlalchemy` (async), `asyncpg`, `alembic`, `aiosqlite` (tests), `pytest`, `pytest-asyncio`.
 - Code Quality: PEP 8, Ruff formatting/linting, Google Python Style Guide for docstrings.
 - No AI Fluff: do not write obvious comments (e.g. `# loop over items`). Document architectural intent ("why", not "what").
 
@@ -18,7 +18,7 @@ Codebase Communication Standard: all source code, architectural documentation, i
 - Presentation Layer (`src/api`): Controllers, routers, request/response DTOs, SSE streaming. Zero direct DB/Chroma/OpenAI calls here.
 - Domain & Core Layer (`src/core`): Domain entities, interfaces/ABCs, business logic, RAG orchestration, and token bounding.
 - Ingestion Layer (`src/ingestion`): Text parsing, deterministic chunking, metadata enrichment.
-- Storage Layer (`src/storage`): Concrete adapters for ChromaDB and SQLite audit trails.
+- Storage Layer (`src/storage`): Concrete adapters for ChromaDB and SQLAlchemy audit trails.
 - Configuration (`src/config`): Typed environment settings via Pydantic Settings (`.env`).
 - Single Responsibility: an API endpoint must never parse chunks; a vector store adapter must never format prompt templates.
 

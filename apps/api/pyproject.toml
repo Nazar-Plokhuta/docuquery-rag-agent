@@ -24,6 +24,11 @@ dependencies = [
     "chromadb>=0.5.0",
     "openai>=1.40.0",
     "tiktoken>=0.7.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.0",
+    # Not a production driver: SQLAlchemy uses it for the hermetic in-memory
+    # SQLite databases that keep the test suite offline.
     "aiosqlite>=0.20.0",
     "httpx>=0.27.0",
     "python-multipart>=0.0.9",
@@ -70,6 +75,9 @@ extend-immutable-calls = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]
+# The local `alembic/` migrations directory would otherwise make Ruff classify
+# the third-party Alembic package as first-party.
+known-third-party = ["alembic"]
 
 [tool.ruff.format]
 quote-style = "double"

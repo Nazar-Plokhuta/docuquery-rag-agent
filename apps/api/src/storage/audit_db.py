@@ -1,199 +1,176 @@
-"""SQLite-backed audit repository using aiosqlite.
+"""SQLAlchemy-backed audit repository for RAG query telemetry.
 
-Stores a ``TelemetryRecord`` for every RAG query processed by this service.
-The schema is intentionally minimal (no FK constraints, single table) to keep
-startup migrations instant and the file fully portable.
+Persists a ``TelemetryRecord`` for every RAG query processed by this service.
+The repository is dialect-agnostic: production runs on PostgreSQL through
+``postgresql+asyncpg://``, while the test suite uses
+``sqlite+aiosqlite:///:memory:`` to stay offline without a database server.
 
-Design note — persistent connection:
-    A single ``aiosqlite.Connection`` is opened in ``initialize_db()`` and
-    reused by all subsequent operations.  This is intentional:
+Design note — session per operation:
+    Every operation opens a short-lived ``AsyncSession`` and returns its
+    connection to the engine pool on exit, so no connection is pinned for the
+    application's lifetime and concurrent requests do not queue behind one
+    another. For ``:memory:`` SQLite, SQLAlchemy backs the engine with a
+    ``StaticPool`` that shares the single connection, so the schema created by
+    ``initialize_db()`` stays visible to later sessions.
 
-    1. It is the only strategy compatible with ``:memory:`` databases (each
-       new ``aiosqlite.connect(":memory:")`` call creates an isolated DB).
-    2. For file-based databases it avoids per-operation connect/disconnect
-       overhead under moderate request rates.
-    3. The connection is closed explicitly in ``close()``, which should be
-       called from the FastAPI lifespan shutdown hook.
+Design note — error reporting:
+    ``StorageError.message`` is surfaced to API clients and logs. The caught
+    exception's text is therefore never interpolated into it: ``str()`` of a
+    SQLAlchemy error embeds the statement's bound parameters, which would leak
+    user queries and model responses. Only exception type names are reported;
+    the original exception stays on ``__cause__``.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
-import aiosqlite
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from src.config.settings import Settings
 from src.core.exceptions import StorageError
 from src.core.interfaces import AuditRepositoryInterface
 from src.core.models import TelemetryRecord
+from src.storage.orm_models import Base, QueryTelemetryRow
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# SQL statements
-# ---------------------------------------------------------------------------
-
-_CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS query_telemetry (
-    request_id        TEXT PRIMARY KEY,
-    query_text        TEXT NOT NULL,
-    response_text     TEXT NOT NULL,
-    latency_ms        REAL NOT NULL,
-    prompt_tokens     INTEGER NOT NULL,
-    completion_tokens INTEGER NOT NULL,
-    total_tokens      INTEGER NOT NULL,
-    model_name        TEXT NOT NULL,
-    created_at        TEXT NOT NULL
-);
-"""
-
-_INSERT_SQL = """
-INSERT INTO query_telemetry (
-    request_id, query_text, response_text, latency_ms,
-    prompt_tokens, completion_tokens, total_tokens, model_name, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-"""
-
-_SELECT_RECENT_SQL = """
-SELECT
-    request_id, query_text, response_text, latency_ms,
-    prompt_tokens, completion_tokens, total_tokens, model_name, created_at
-FROM query_telemetry
-ORDER BY created_at DESC
-LIMIT ?;
-"""
+# asyncpg reports an unreachable server as a raw ``OSError`` (for example
+# ``ConnectionRefusedError``) that SQLAlchemy does not wrap, so catching
+# ``SQLAlchemyError`` alone would let a database outage escape as an untyped 500.
+_DATABASE_ERRORS: tuple[type[Exception], ...] = (SQLAlchemyError, OSError)
 
 
-class SQLiteAuditRepository(AuditRepositoryInterface):
-    """Concrete audit repository backed by SQLite via ``aiosqlite``.
+def _error_kind(exc: Exception) -> str:
+    """Name a database failure without echoing the exception text.
+
+    DBAPI errors carry the driver exception as ``orig``; including its type
+    distinguishes e.g. ``IntegrityError(UniqueViolationError)`` from
+    ``OperationalError(ConnectionDoesNotExistError)``.
+    """
+    orig = getattr(exc, "orig", None)
+    if orig is None:
+        return type(exc).__name__
+    return f"{type(exc).__name__}({type(orig).__name__})"
+
+
+class SQLAlchemyAuditRepository(AuditRepositoryInterface):
+    """Concrete audit repository backed by SQLAlchemy 2.0 async sessions.
+
+    Exactly one of ``engine`` or ``session_factory`` must be supplied.
 
     Args:
-        settings: Application settings providing the SQLite DB file path.
-            Pass ``sqlite_database_path=":memory:"`` in tests for a hermetic,
-            in-process store that requires no filesystem access.
+        engine: Async engine to build sessions from. The repository owns it and
+            disposes it in ``close()``.
+        session_factory: Pre-configured session factory, for callers that need
+            custom session options. The caller retains ownership of the
+            underlying engine, so ``close()`` leaves it untouched. The factory
+            should set ``expire_on_commit=False``.
+
+    Raises:
+        ValueError: If neither or both of ``engine`` and ``session_factory`` are given.
     """
 
-    def __init__(self, settings: Settings) -> None:
-        self._db_path: str = settings.sqlite_database_path
-        self._connection: aiosqlite.Connection | None = None
+    def __init__(
+        self,
+        engine: AsyncEngine | None = None,
+        *,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
+    ) -> None:
+        if engine is not None and session_factory is None:
+            self._engine: AsyncEngine | None = engine
+            self._session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        elif session_factory is not None and engine is None:
+            self._engine = None
+            self._session_factory = session_factory
+        else:
+            raise ValueError("Provide exactly one of 'engine' or 'session_factory'.")
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def initialize_db(self) -> None:
-        """Open the persistent connection and create the audit schema.
+        """Create the audit schema if it does not exist yet.
 
-        Idempotent — ``CREATE TABLE IF NOT EXISTS`` ensures repeated calls on
-        a file-based DB are safe across restarts.
+        Idempotent: ``create_all`` checks for each table first, so repeated
+        calls across restarts are safe. It is a bootstrap and test convenience
+        that never alters an existing table; evolve production schemas with
+        Alembic.
 
         Raises:
-            StorageError: If the connection cannot be opened or the DDL fails.
+            StorageError: If the database is unreachable or the DDL fails.
         """
         try:
-            conn = await aiosqlite.connect(self._db_path)
-            conn.row_factory = aiosqlite.Row
-            await conn.execute(_CREATE_TABLE_SQL)
-            await conn.commit()
-            self._connection = conn
-            logger.info("SQLite audit DB initialised at %r", self._db_path)
-        except Exception as exc:
+            async with self._session_factory() as session:
+                connection = await session.connection()
+                await connection.run_sync(Base.metadata.create_all)
+                await session.commit()
+        except _DATABASE_ERRORS as exc:
             raise StorageError(
-                f"Failed to initialise audit database at {self._db_path!r}: {exc}"
+                f"Failed to initialise audit database schema: {_error_kind(exc)}"
             ) from exc
+        logger.info("Audit database schema is ready.")
 
     async def close(self) -> None:
-        """Close the persistent connection.
+        """Dispose the engine and its connection pool.
 
-        Should be called from the FastAPI lifespan shutdown hook.
+        Should be called from the FastAPI lifespan shutdown hook. A no-op for
+        the engine when the repository was built from a caller-owned
+        ``session_factory``.
         """
-        if self._connection is not None:
-            await self._connection.close()
-            self._connection = None
-            logger.info("SQLite audit DB connection closed.")
-
-    # ------------------------------------------------------------------
-    # Internal helper
-    # ------------------------------------------------------------------
-
-    async def _get_connection(self) -> aiosqlite.Connection:
-        """Return the active connection, auto-initialising if not yet open.
-
-        Auto-init is a convenience for ad-hoc usage (e.g. CLI scripts);
-        the canonical path is explicit ``initialize_db()`` at startup.
-        """
-        if self._connection is None:
-            await self.initialize_db()
-        # initialize_db() always sets self._connection; assertion for type narrowing.
-        assert self._connection is not None
-        return self._connection
+        if self._engine is not None:
+            await self._engine.dispose()
+            logger.info("Audit database engine disposed.")
 
     # ------------------------------------------------------------------
     # AuditRepositoryInterface implementation
     # ------------------------------------------------------------------
 
     async def log_query(self, record: TelemetryRecord) -> None:
-        """Persist a single telemetry record.
+        """Persist a single telemetry record in its own transaction.
 
         Args:
             record: Populated ``TelemetryRecord`` for the completed RAG request.
 
         Raises:
-            StorageError: If the INSERT fails (e.g. duplicate ``request_id``).
+            StorageError: If the INSERT or commit fails (e.g. duplicate
+                ``request_id`` or an unreachable database). The transaction is
+                rolled back first.
         """
-        conn = await self._get_connection()
-        try:
-            await conn.execute(
-                _INSERT_SQL,
-                (
-                    record.request_id,
-                    record.query_text,
-                    record.response_text,
-                    record.latency_ms,
-                    record.prompt_tokens,
-                    record.completion_tokens,
-                    record.total_tokens,
-                    record.model_name,
-                    record.created_at,
-                ),
-            )
-            await conn.commit()
-            logger.debug("Telemetry record %r persisted.", record.request_id)
-        except Exception as exc:
-            raise StorageError(
-                f"Failed to log telemetry record {record.request_id!r}: {exc}"
-            ) from exc
+        async with self._session_factory() as session:
+            try:
+                session.add(QueryTelemetryRow(**record.model_dump()))
+                await session.commit()
+            except _DATABASE_ERRORS as exc:
+                await session.rollback()
+                raise StorageError(
+                    f"Failed to log telemetry record {record.request_id!r}: {_error_kind(exc)}"
+                ) from exc
+        logger.debug("Telemetry record %r persisted.", record.request_id)
 
-    async def get_recent_logs(self, limit: int = 50) -> list[TelemetryRecord]:
+    async def get_recent_logs(self, limit: int = 50) -> Sequence[TelemetryRecord]:
         """Retrieve the most recent telemetry records.
 
         Args:
             limit: Maximum number of rows to return (default 50).
 
         Returns:
-            List of ``TelemetryRecord`` sorted descending by ``created_at``.
+            Records sorted descending by ``created_at``.
 
         Raises:
-            StorageError: If the SELECT query fails.
+            StorageError: If the SELECT fails.
         """
-        conn = await self._get_connection()
+        statement = (
+            select(QueryTelemetryRow).order_by(QueryTelemetryRow.created_at.desc()).limit(limit)
+        )
         try:
-            async with conn.execute(_SELECT_RECENT_SQL, (limit,)) as cursor:
-                rows = await cursor.fetchall()
-        except Exception as exc:
-            raise StorageError(f"Failed to retrieve recent telemetry logs: {exc}") from exc
-
-        return [
-            TelemetryRecord(
-                request_id=row["request_id"],
-                query_text=row["query_text"],
-                response_text=row["response_text"],
-                latency_ms=row["latency_ms"],
-                prompt_tokens=row["prompt_tokens"],
-                completion_tokens=row["completion_tokens"],
-                total_tokens=row["total_tokens"],
-                model_name=row["model_name"],
-                created_at=row["created_at"],
-            )
-            for row in rows
-        ]
+            async with self._session_factory() as session:
+                rows = (await session.scalars(statement)).all()
+        except _DATABASE_ERRORS as exc:
+            raise StorageError(
+                f"Failed to retrieve recent telemetry logs: {_error_kind(exc)}"
+            ) from exc
+        return [TelemetryRecord.model_validate(row, from_attributes=True) for row in rows]

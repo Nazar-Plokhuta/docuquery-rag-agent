@@ -12,7 +12,7 @@
 2. [Clean Architecture Layers](#2-clean-architecture-layers)
 3. [API Endpoint Reference](#3-api-endpoint-reference)
 4. [Data Contracts](#4-data-contracts)
-5. [SQLite Telemetry Schema](#5-sqlite-telemetry-schema)
+5. [Telemetry Schema](#5-telemetry-schema)
 6. [Core Interfaces](#6-core-interfaces)
 7. [Non-Negotiable Invariants](#7-non-negotiable-invariants)
 
@@ -42,7 +42,7 @@ apps/api/src/
 ├── config/          # Environment-bound configuration
 ├── core/            # Domain models, interfaces, exceptions
 ├── ingestion/       # Text parsing, chunking, batch embedding
-├── storage/         # ChromaDB and SQLite concrete adapters
+├── storage/         # ChromaDB and SQLAlchemy (PostgreSQL) concrete adapters
 └── api/             # FastAPI routers, request/response DTOs
 ```
 
@@ -78,7 +78,8 @@ The ingestion layer never formats prompt templates or writes to audit storage.
 **Sole responsibility:** Provide concrete I/O adapters that implement the core interfaces.
 
 - `vector_store.py` — `ChromaVectorStore` implements `VectorStoreInterface` using `chromadb.PersistentClient`. All blocking Chroma calls are wrapped in `asyncio.to_thread()`.
-- `audit_db.py` — `SQLiteAuditRepository` implements `AuditRepositoryInterface` using `aiosqlite`. A single persistent connection is opened at application startup and closed at shutdown.
+- `orm_models.py` — SQLAlchemy declarative `Base` and the `query_telemetry` table mapping; `Base.metadata` is Alembic's autogenerate target.
+- `audit_db.py` — `SQLAlchemyAuditRepository` implements `AuditRepositoryInterface` over an `AsyncEngine`. Each operation uses a short-lived `AsyncSession`; the engine is created at application startup and disposed at shutdown.
 
 Storage adapters must never format response payloads for API consumers or parse document text.
 
@@ -93,7 +94,7 @@ Storage adapters must never format response payloads for API consumers or parse 
 - `schemas/` — Input DTOs (`QueryRequest`, `IngestResponse`) enforce `model_config = ConfigDict(extra="forbid")`. Output DTOs (`QueryResponse`, `AnalyticsResponse`) are frozen Pydantic models.
 - `dependencies.py` — FastAPI `Depends` factories that resolve long-lived service instances from `app.state` on each request without incurring per-request reconnection overhead.
 
-All endpoints use FastAPI `Depends` for service injection. Zero direct calls to ChromaDB, SQLite, or OpenAI are permitted inside routers.
+All endpoints use FastAPI `Depends` for service injection. Zero direct calls to ChromaDB, the audit database, or OpenAI are permitted inside routers.
 
 ### 2.6 Composition root (`src/main.py`)
 
@@ -123,7 +124,7 @@ All endpoints are served under the `/api/v1` versioning prefix. OpenAPI document
 **Request body:** `QueryRequest` — `query` (string, `min_length=1`), `top_k` (int, `1–20`, default `4`), `score_threshold` (float, `0.0–1.0`, default `0.3`). Unknown fields are rejected (`extra="forbid"`).  
 **Response:** `QueryResponse` — `query`, `answer`, `citations[]`, `latency_ms`, `total_tokens`.  
 **Anti-hallucination:** When no retrieved chunk meets `score_threshold`, `FALLBACK_REFUSAL_MESSAGE` is returned as `answer` and `citations` is empty. The LLM is never called on this fast path.  
-**Telemetry:** Every call (including refusals) persists a `TelemetryRecord` to SQLite.
+**Telemetry:** Every call (including refusals) persists a `TelemetryRecord` to the audit database.
 
 ### 3.3 `POST /api/v1/query/stream`
 
@@ -243,50 +244,59 @@ Typed liveness probe payload, defined in `src/api/routes/health.py` rather than 
 
 ---
 
-## 5. SQLite Telemetry Schema
+## 5. Telemetry Schema
 
-The audit database contains a single table. No foreign keys, no multi-table joins — the design prioritises zero-dependency portability and instant startup migrations.
+The audit database contains a single table. No foreign keys, no multi-table joins. The schema is declared once as a SQLAlchemy model (`src/storage/orm_models.py`) and versioned by Alembic (`apps/api/alembic/`). PostgreSQL is the production target; in-memory SQLite backs the test suite.
 
 ### 5.1 Table DDL
 
+PostgreSQL DDL as emitted by migration `0001_initial_query_telemetry`:
+
 ```sql
-CREATE TABLE IF NOT EXISTS query_telemetry (
-    request_id        TEXT PRIMARY KEY,
+CREATE TABLE query_telemetry (
+    request_id        VARCHAR NOT NULL,
     query_text        TEXT NOT NULL,
     response_text     TEXT NOT NULL,
-    latency_ms        REAL NOT NULL,
+    latency_ms        FLOAT NOT NULL,
     prompt_tokens     INTEGER NOT NULL,
     completion_tokens INTEGER NOT NULL,
     total_tokens      INTEGER NOT NULL,
-    model_name        TEXT NOT NULL,
-    created_at        TEXT NOT NULL
+    model_name        VARCHAR NOT NULL,
+    created_at        VARCHAR NOT NULL,
+    PRIMARY KEY (request_id)
 );
 ```
 
 ### 5.2 Column Definitions
 
-| Column | SQLite Type | Constraints | Notes |
+| Column | PostgreSQL Type | Constraints | Notes |
 |---|---|---|---|
-| `request_id` | `TEXT` | `PRIMARY KEY` | UUID string; implicit B-tree index for O(log n) point lookups |
+| `request_id` | `VARCHAR` | `PRIMARY KEY` | UUID string; implicit B-tree index for O(log n) point lookups |
 | `query_text` | `TEXT` | `NOT NULL` | Raw user query; unbounded length |
 | `response_text` | `TEXT` | `NOT NULL` | Full LLM response; may be the anti-hallucination refusal phrase |
-| `latency_ms` | `REAL` | `NOT NULL` | 64-bit IEEE-754 float; millisecond wall-clock precision |
+| `latency_ms` | `DOUBLE PRECISION` | `NOT NULL` | 64-bit IEEE-754 float (SQLAlchemy `Float`); millisecond wall-clock precision |
 | `prompt_tokens` | `INTEGER` | `NOT NULL` | Prompt token count from the OpenAI usage object |
 | `completion_tokens` | `INTEGER` | `NOT NULL` | Completion token count from the OpenAI usage object |
 | `total_tokens` | `INTEGER` | `NOT NULL` | Sum of prompt and completion tokens |
-| `model_name` | `TEXT` | `NOT NULL` | OpenAI model identifier; enables per-model cost attribution |
-| `created_at` | `TEXT` | `NOT NULL` | ISO-8601 UTC string; sorted lexicographically for `ORDER BY created_at DESC` |
+| `model_name` | `VARCHAR` | `NOT NULL` | OpenAI model identifier; enables per-model cost attribution |
+| `created_at` | `VARCHAR` | `NOT NULL` | ISO-8601 UTC string (`YYYY-MM-DDTHH:MM:SSZ`), stored as text so it round-trips byte-for-byte on every backend; sorts lexicographically for `ORDER BY created_at DESC` |
 
 ### 5.3 Indexing Rationale
 
-The only explicit index is the `PRIMARY KEY` on `request_id`, which SQLite implements as a B-tree index automatically. No additional secondary indexes are provisioned at this stage because:
+The only explicit index is the `PRIMARY KEY` on `request_id`, which both PostgreSQL and SQLite back with a B-tree index automatically. No additional secondary indexes are provisioned at this stage because:
 
-- The dominant query pattern (`get_recent_logs`) reads the most recent rows ordered by `created_at`. At current expected volumes (≪ 100 k rows), a full sequential scan with `ORDER BY created_at DESC LIMIT ?` is faster than a secondary index scan due to SQLite's page cache behaviour.
-- A secondary index on `created_at` is a planned Sprint 3 migration once query volume benchmarks justify it.
+- The dominant query pattern (`get_recent_logs`) reads the most recent rows ordered by `created_at`. At current expected volumes (≪ 100 k rows), a sequential scan with a top-N sort (`ORDER BY created_at DESC LIMIT n`) is inexpensive.
+- A secondary index on `created_at` is a candidate Alembic migration once query volume benchmarks justify it.
 
 ### 5.4 Connection Strategy
 
-`SQLiteAuditRepository` opens a **single persistent `aiosqlite.Connection`** for the application's lifetime. This is the only strategy compatible with in-memory databases (`":memory:"`), where each new `aiosqlite.connect(":memory:")` call produces a completely isolated, empty database. The persistent connection is stored on `app.state.audit_repo` and closed in the lifespan shutdown hook.
+`SQLAlchemyAuditRepository` is built from one `AsyncEngine`, created in the lifespan with `create_async_engine(settings.database_url, pool_pre_ping=True, hide_parameters=True)` and shared for the application's lifetime. Each operation opens a short-lived `AsyncSession` and returns its pooled connection on exit, so concurrent requests do not queue behind a single connection. The repository is stored on `app.state.audit_repo`; `close()` disposes the engine in the lifespan shutdown hook.
+
+For `sqlite+aiosqlite:///:memory:` SQLAlchemy backs the engine with a `StaticPool` that shares one connection, so the schema created by `initialize_db()` stays visible to later sessions. This is what keeps the test suite offline without a PostgreSQL server.
+
+**Schema bootstrap.** `initialize_db()` runs `metadata.create_all`, which is idempotent and never alters an existing table; it exists for tests and first start. Migration `0001` skips table creation when the table already exists, so a database bootstrapped by the service can still be adopted by `alembic upgrade head`. Evolve production schemas with Alembic.
+
+**Error reporting.** Database failures, including the raw `OSError` that asyncpg raises for an unreachable server, are re-raised as `StorageError`. The message carries exception type names only: `str()` of a SQLAlchemy error embeds bound parameters (user queries and model responses), and `StorageError.message` is returned to API clients.
 
 ### 5.5 Runtime Logging
 
@@ -372,7 +382,7 @@ Application code must never raise bare `Exception` or `RuntimeError` at the doma
 | Exception | HTTP Mapping | Trigger |
 |---|---|---|
 | `ResourceNotFoundError` | 404 | Requested document or entity not found |
-| `StorageError` | 503 | ChromaDB or SQLite operation failure |
+| `StorageError` | 503 | ChromaDB or audit database operation failure |
 | `ConfigurationError` | 500 | Missing or invalid settings at boot time |
 | `AppException` (catch-all) | 500 | Any other domain fault |
 
@@ -413,7 +423,7 @@ The SSE event format is the [WHATWG EventSource](https://html.spec.whatwg.org/mu
 
 **Context:** Both `IngestionPipeline` and `RAGEngine` depend on the same `ChromaVectorStore`, `AsyncOpenAI` client, and `Settings` instance. A naïve FastAPI implementation might construct these dependencies fresh for every `Depends` resolution, resulting in multiple `chromadb.PersistentClient` handles open concurrently (which triggers file-locking conflicts) and multiple `AsyncOpenAI` instances that each maintain their own `httpx` connection pool (inflating file descriptor usage and TLS handshake overhead).
 
-**Decision:** All long-lived service instances — `SQLiteAuditRepository`, `ChromaVectorStore`, `AsyncOpenAI`, `TokenBudgetManager`, `RAGEngine`, and `IngestionPipeline` — are constructed exactly once inside the `@asynccontextmanager lifespan()` function and attached to `app.state` before the application begins accepting requests:
+**Decision:** All long-lived service instances — `SQLAlchemyAuditRepository`, `ChromaVectorStore`, `AsyncOpenAI`, `TokenBudgetManager`, `RAGEngine`, and `IngestionPipeline` — are constructed exactly once inside the `@asynccontextmanager lifespan()` function and attached to `app.state` before the application begins accepting requests:
 
 ```python
 app.state.audit_repo = audit_repo
@@ -427,6 +437,6 @@ Thin `Depends` factory functions in `src/api/dependencies.py` resolve these from
 **Consequences:**
 - A single `chromadb.PersistentClient` holds the exclusive write lock on the HNSW index throughout the application's lifetime. Concurrent `add_documents` and `similarity_search` calls serialize through `asyncio.to_thread()`, which is safe because ChromaDB manages its own internal locking.
 - A single `AsyncOpenAI` instance shares one `httpx.AsyncClient` and its underlying connection pool across all concurrent requests, reducing TLS handshake overhead and file descriptor usage under load.
-- `SQLiteAuditRepository` maintains its single persistent `aiosqlite.Connection` (see ADR-02), which is safe to share because `aiosqlite` serialises all database operations through an internal queue.
+- `SQLAlchemyAuditRepository` shares one pooled `AsyncEngine` (see ADR-02); each operation checks a connection out of the pool in its own short-lived session, so concurrent requests do not contend on a single connection.
 - The ingestion and query paths share the same `ChromaVectorStore` instance, so documents indexed via `POST /api/v1/ingest/file` are immediately queryable via `POST /api/v1/query/` without any cache invalidation, replica lag, or consistency delay.
 - `TokenBudgetManager` loads the `cl100k_base` tiktoken BPE vocabulary once in its `__init__` and caches the `tiktoken.Encoding` object on the instance. Sharing this instance avoids repeated BPE vocabulary deserialisation across requests.

@@ -108,7 +108,7 @@ def _spawn_server(workspace: tempfile.TemporaryDirectory[str]) -> subprocess.Pop
     root = Path(workspace.name)
     env = os.environ.copy()
     env["CHROMA_PERSIST_DIRECTORY"] = str(root / "chroma")
-    env["SQLITE_DATABASE_PATH"] = str(root / "telemetry.db")
+    env["DATABASE_URL"] = f"sqlite+aiosqlite:///{root / 'telemetry.db'}"
     return subprocess.Popen(
         [
             sys.executable,

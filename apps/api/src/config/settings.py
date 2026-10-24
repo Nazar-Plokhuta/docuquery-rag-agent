@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     - **Application runtime**: env label, serving port, log verbosity.
     - **OpenAI**: API key, chat model, and embedding model identifiers.
     - **Vector store**: ChromaDB persistence directory.
-    - **Relational store**: SQLite file path for the telemetry / audit trail.
+    - **Relational store**: SQLAlchemy async URL for the telemetry / audit trail.
     """
 
     model_config = SettingsConfigDict(
@@ -61,9 +61,11 @@ class Settings(BaseSettings):
     chroma_persist_directory: str = "./data/chroma_db"
 
     # ------------------------------------------------------------------
-    # Relational / audit store (SQLite via aiosqlite)
+    # Relational / audit store (SQLAlchemy async)
     # ------------------------------------------------------------------
-    sqlite_database_path: str = "./data/telemetry.db"
+    # PostgreSQL in production. Tests and throwaway local runs may point this at
+    # `sqlite+aiosqlite:///:memory:` (or a file path) to avoid a database server.
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/docuquery"
 
 
 @lru_cache(maxsize=1)

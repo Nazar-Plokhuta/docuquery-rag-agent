@@ -40,7 +40,7 @@ class ResourceNotFoundError(AppException):
 
 
 class StorageError(AppException):
-    """Raised when a persistence operation fails (ChromaDB or SQLite).
+    """Raised when a persistence operation fails (ChromaDB or the relational audit store).
 
     Wraps lower-level driver exceptions to prevent storage internals from
     leaking into API responses or logs at unexpected severity levels.

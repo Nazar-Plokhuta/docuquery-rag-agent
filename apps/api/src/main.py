@@ -22,6 +22,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from openai import AsyncOpenAI
 from rich.logging import RichHandler
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from src.api.routes import analytics as analytics_router
 from src.api.routes import health as health_router
@@ -39,7 +40,7 @@ from src.core.rag.engine import RAGEngine
 from src.core.rag.token_counter import TokenBudgetManager
 from src.ingestion.chunker import TokenSlidingWindowChunker
 from src.ingestion.pipeline import IngestionPipeline
-from src.storage.audit_db import SQLiteAuditRepository
+from src.storage.audit_db import SQLAlchemyAuditRepository
 from src.storage.vector_store import ChromaVectorStore
 
 logger = logging.getLogger(__name__)
@@ -88,13 +89,9 @@ async def _provision_directories() -> None:
     makes the operation idempotent across hot-reloads and container restarts.
     """
     settings = get_settings()
-    directories: list[Path] = [
-        Path(settings.chroma_persist_directory),
-        Path(settings.sqlite_database_path).parent,
-    ]
-    for directory in directories:
-        directory.mkdir(parents=True, exist_ok=True)
-        logger.info("Provisioned directory: %s", directory.resolve())
+    directory = Path(settings.chroma_persist_directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    logger.info("Provisioned directory: %s", directory.resolve())
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +106,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Startup sequence:
     1. Configure root and Uvicorn logging through ``RichHandler``.
     2. Provision required filesystem directories.
-    3. Initialise and connect the SQLite audit repository.
+    3. Create the async SQLAlchemy engine and bootstrap the audit repository.
     4. Construct the ChromaDB vector store adapter (lazy I/O — no network call
        yet; the collection is opened on first actual read/write).
     5. Construct the async OpenAI client.
@@ -120,7 +117,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     9. Attach all services to ``app.state`` for DI resolution per request.
 
     Shutdown:
-    - Close the SQLite connection, draining any in-flight writes.
+    - Dispose the audit engine and its connection pool.
     - ChromaDB, OpenAI client, and tiktoken hold no persistent connections
       requiring explicit teardown.
     """
@@ -135,9 +132,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await _provision_directories()
 
     # ── Storage layer ────────────────────────────────────────────────────────
-    # SQLite: open a single persistent connection for the application's entire
-    # lifetime (see ADR-02 in docs/internal/architecture.md).
-    audit_repo = SQLiteAuditRepository(settings)
+    # Relational audit store: one pooled async engine for the application's
+    # lifetime. ``pool_pre_ping`` discards connections a database restart or
+    # idle timeout has silently killed; ``hide_parameters`` keeps bound values
+    # (user queries and model responses) out of SQLAlchemy error messages.
+    audit_engine = create_async_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        hide_parameters=True,
+    )
+    audit_repo = SQLAlchemyAuditRepository(audit_engine)
     await audit_repo.initialize_db()
     app.state.audit_repo = audit_repo
 

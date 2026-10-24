@@ -10,7 +10,7 @@ Design principles:
   state across unrelated tests or into the session-scoped settings override.
 - Mock instances are created with ``AsyncMock(spec=...)`` so type errors in
   calling code surface as ``AttributeError`` at test time, not silently.
-- Real I/O (ChromaDB, OpenAI, SQLite) never occurs during integration tests
+- Real I/O (ChromaDB, OpenAI, the audit database) never occurs during integration tests
   because every DI provider function is replaced by a lambda returning a mock.
 """
 
@@ -68,9 +68,9 @@ async def integration_client(
     """Yield an ``AsyncClient`` with all service DI providers replaced by mocks.
 
     The client is bound to the FastAPI ASGI app via an in-process transport
-    so no real TCP socket is opened.  Lifespan startup still runs (provisioning
-    directories and creating a real SQLiteAuditRepository), but every request
-    that reaches a route handler receives the mock services via DI override.
+    so no real TCP socket is opened.  ``ASGITransport`` does not run the app
+    lifespan, so no real service is constructed, and every request that reaches
+    a route handler receives the mock services via DI override.
 
     The session-scoped ``get_settings`` override from the top-level conftest
     is preserved; only the service-layer overrides are added and removed here.

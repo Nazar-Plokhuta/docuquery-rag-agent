@@ -32,7 +32,7 @@ from src.config.settings import Settings
 _REQUIRED_OVERRIDES: dict[str, str] = {
     "openai_api_key": "sk-test",
     "chroma_persist_directory": "/tmp/chroma",
-    "sqlite_database_path": "/tmp/telemetry.db",
+    "database_url": "sqlite+aiosqlite:///:memory:",
 }
 
 
@@ -105,6 +105,41 @@ class TestOpenAIBaseUrl:
         settings = _make_settings(openai_base_url=url)
         assert settings.openai_base_url == url
         assert isinstance(settings.openai_base_url, str)
+
+
+# ---------------------------------------------------------------------------
+# TestDatabaseUrl
+# ---------------------------------------------------------------------------
+
+
+class TestDatabaseUrl:
+    """Validate the ``database_url`` field that selects the relational audit store."""
+
+    def test_defaults_to_local_postgres_asyncpg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The compiled-in default must target PostgreSQL through the asyncpg driver."""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        # Bypass the helper's in-memory override to observe the real default.
+        settings = Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            openai_api_key="sk-test",
+            chroma_persist_directory="/tmp/chroma",
+        )
+        assert settings.database_url == (
+            "postgresql+asyncpg://postgres:postgres@localhost:5432/docuquery"
+        )
+
+    def test_env_var_name_is_database_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The field must be resolved from the ``DATABASE_URL`` process env var."""
+        expected_url = "postgresql+asyncpg://svc:secret@db.internal:5432/audit"
+        monkeypatch.setenv("DATABASE_URL", expected_url)
+
+        # Build without the helper so no kwarg masks the env var.
+        settings = Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            openai_api_key="sk-test",
+            chroma_persist_directory="/tmp/chroma",
+        )
+        assert settings.database_url == expected_url
 
 
 # ---------------------------------------------------------------------------

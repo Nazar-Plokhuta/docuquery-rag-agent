@@ -2,7 +2,7 @@
 
 All OpenAI API calls and storage operations are isolated via
 ``unittest.mock.AsyncMock`` and ``unittest.mock.MagicMock``.  No live
-network connections, ChromaDB instances, or SQLite databases are required.
+network connections, ChromaDB instances, or relational databases are required.
 
 Test groups:
 - TestRAGEngineQuery  — non-streaming query() method.
@@ -33,7 +33,7 @@ def _make_settings() -> Settings:
         openai_model="gpt-4o-mini",
         embedding_model="text-embedding-3-small",
         chroma_persist_directory="/tmp/test_chroma_db",
-        sqlite_database_path="/tmp/test_telemetry.db",
+        database_url="sqlite+aiosqlite:///:memory:",
     )
 
 

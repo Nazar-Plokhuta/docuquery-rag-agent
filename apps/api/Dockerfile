@@ -32,6 +32,9 @@ RUN pip install --upgrade pip \
         "chromadb>=0.5.0" \
         "openai>=1.40.0" \
         "tiktoken>=0.7.0" \
+        "sqlalchemy[asyncio]>=2.0.0" \
+        "asyncpg>=0.29.0" \
+        "alembic>=1.13.0" \
         "aiosqlite>=0.20.0" \
         "httpx>=0.27.0"
 
@@ -47,11 +50,14 @@ COPY --from=builder /install /usr/local
 
 WORKDIR /app
 
-# Copy application source.
+# Copy application source and the Alembic environment so the image can run
+# `alembic upgrade head` against the configured DATABASE_URL.
 COPY src/ ./src/
+COPY alembic.ini ./
+COPY alembic/ ./alembic/
 
 # Persistent data directory — mounted as a Docker volume in production so that
-# ChromaDB and SQLite state survives container replacement.
+# ChromaDB (and the optional SQLite audit file) survives container replacement.
 RUN mkdir -p /app/data && chown -R appuser:appgroup /app
 
 USER appuser

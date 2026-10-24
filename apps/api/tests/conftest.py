@@ -33,7 +33,7 @@ def _test_settings() -> Settings:
         openai_model="gpt-4o-mini",
         embedding_model="text-embedding-3-small",
         chroma_persist_directory="/tmp/test_chroma_db",
-        sqlite_database_path="/tmp/test_telemetry.db",
+        database_url="sqlite+aiosqlite:///:memory:",
     )
 
 

@@ -3,7 +3,7 @@
 [![Release](https://img.shields.io/badge/RELEASE-V1.2.0-blue?style=for-the-badge&logo=github)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/releases/tag/v1.2.0)
 [![CI Pipeline](https://img.shields.io/badge/CI%20PIPELINE-PASSING-brightgreen?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/PYTHON-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/TESTS-160%20PASSING-44cc11?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent)
+[![Tests](https://img.shields.io/badge/TESTS-169%20PASSING-44cc11?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent)
 
 > **Enterprise-grade Retrieval-Augmented Generation microservice.** Strict grounding. Zero hallucinations. Full async. Production-ready from day one.
 
@@ -62,7 +62,7 @@ flowchart TD
     subgraph Storage["Storage Layer  (src/storage)"]
         direction TB
         VEC["ChromaVectorStore\n(asyncio.to_thread · HNSW cosine)"]
-        ADB["SQLiteAuditRepository\n(aiosqlite · persistent connection)"]
+        ADB["SQLAlchemyAuditRepository\n(async SQLAlchemy · asyncpg)"]
     end
 
     subgraph Gateways["External Gateways"]
@@ -94,7 +94,7 @@ POST /api/v1/query/
         ├─ 6. Prompt assembly      → build_rag_prompt() with anti-hallucination system prompt
         ├─ 7. LLM completion       → OpenAI GPT-4o-mini, temperature=0.0
         ├─ 8. Citation extraction  → one Citation per budgeted chunk
-        └─ 9. Telemetry logging    → TelemetryRecord → SQLite audit trail
+        └─ 9. Telemetry logging    → TelemetryRecord → PostgreSQL audit trail
 ```
 
 ---
@@ -169,7 +169,7 @@ docker compose --env-file .env -f docker/docker-compose.yml up --build
 curl http://localhost:8000/api/v1/health/
 ```
 
-The repository-level `data/` directory is bind-mounted into the container, so ChromaDB vector indices and SQLite telemetry persist across container restarts. `--env-file .env` is required because Compose only reads a `.env` located next to the compose file (`docker/`) for variable interpolation; the shared `.env` lives at the repository root.
+The repository-level `data/` directory is bind-mounted into the container, so ChromaDB vector indices and the file-backed SQLite telemetry database that Compose configures persist across container restarts. Set `DATABASE_URL` to a PostgreSQL URL for production. `--env-file .env` is required because Compose only reads a `.env` located next to the compose file (`docker/`) for variable interpolation; the shared `.env` lives at the repository root.
 
 ### Option B: Local Development
 
@@ -187,6 +187,8 @@ pip install -e "apps/api[dev]"
 # 3. Configure environment (one shared .env at the repository root)
 cp .env.example .env
 # Edit .env and set OPENAI_API_KEY=sk-...
+# DATABASE_URL defaults to PostgreSQL; for a server-less run use
+#   DATABASE_URL=sqlite+aiosqlite:///./data/telemetry.db
 
 # 4. Start the server with hot-reload (from the repository root)
 uvicorn src.main:app --app-dir apps/api --reload --port 8000
@@ -440,7 +442,7 @@ curl -s -X POST http://localhost:8000/api/v1/query/ \
 ### Running the Test Suite
 
 ```bash
-# Run full automated test suite (160 tests)
+# Run full automated test suite (169 tests)
 pytest apps/api/tests -v
 
 # Run only unit tests
@@ -508,7 +510,14 @@ The shared `.env` at the repository root is located by absolute path, so it is f
 | `APP_PORT` | `8000` | Server port |
 | `LOG_LEVEL` | `INFO` | Root log level |
 | `CHROMA_PERSIST_DIRECTORY` | `./data/chroma_db` | ChromaDB persistence path |
-| `SQLITE_DATABASE_PATH` | `./data/telemetry.db` | SQLite audit database path |
+| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@localhost:5432/docuquery` | SQLAlchemy async URL of the audit database (`sqlite+aiosqlite:///...` for server-less runs) |
+
+> **Database schema:** The service creates the `query_telemetry` table on startup if it is missing. Use Alembic for reproducible schema changes, run from the repository root:
+>
+> ```bash
+> alembic -c apps/api/alembic.ini upgrade head   # apply migrations to DATABASE_URL
+> alembic -c apps/api/alembic.ini check          # fail when models and migrations drift
+> ```
 
 > **OpenRouter & Custom Gateways:** Set `OPENAI_BASE_URL=https://openrouter.ai/api/v1` and `OPENAI_API_KEY=<your-openrouter-key>` to route all LLM and embedding calls through OpenRouter or any other OpenAI-compatible provider (vLLM, LocalAI, Azure OpenAI). When unset, the service targets the official OpenAI platform. No code changes required.
 
@@ -536,7 +545,8 @@ docuquery-rag-agent/
 │   │   │   │   └── pipeline.py  # IngestionPipeline — load → chunk → embed → index
 │   │   │   ├── storage/
 │   │   │   │   ├── vector_store.py# ChromaVectorStore — asyncio.to_thread HNSW adapter
-│   │   │   │   └── audit_db.py  # SQLiteAuditRepository — aiosqlite persistent connection
+│   │   │   │   ├── orm_models.py# SQLAlchemy declarative base + query_telemetry table (Alembic target)
+│   │   │   │   └── audit_db.py  # SQLAlchemyAuditRepository — async sessions over asyncpg / aiosqlite
 │   │   │   ├── api/
 │   │   │   │   ├── routes/      # health · query · ingestion · analytics routers
 │   │   │   │   ├── schemas/     # QueryRequest · QueryResponse · IngestResponse · AnalyticsResponse
@@ -545,6 +555,7 @@ docuquery-rag-agent/
 │   │   ├── tests/
 │   │   │   ├── unit/            # Unit tests (loaders, chunker, RAG, settings — zero live APIs)
 │   │   │   └── integration/     # Integration tests (mocked engine/pipeline/repo)
+│   │   ├── alembic/         # Alembic migration environment + versions (alembic.ini alongside)
 │   │   ├── pyproject.toml   # Project metadata, dependencies, Ruff, and Pytest config
 │   │   └── Dockerfile       # Multi-stage production image (non-root, slim)
 │   └── web/                 # Next.js frontend (planned — v2.1.0)
@@ -573,7 +584,7 @@ The full ADR log is maintained in [`docs/internal/architecture.md`](docs/interna
 | ADR | Decision |
 |---|---|
 | ADR-01 | ChromaDB blocking calls dispatched via `asyncio.to_thread()` |
-| ADR-02 | Single persistent `aiosqlite` connection shared across lifespan |
+| ADR-02 | Pooled async SQLAlchemy engine with a session per operation for the audit store |
 | ADR-03 | Embedding vectors passed as a separate parameter, not embedded in `DocumentChunk` |
 | ADR-04 | Heading-inclusive scan for Markdown section attribution |
 | ADR-05 | SSE streaming with `X-Accel-Buffering: no` proxy-bypass headers |

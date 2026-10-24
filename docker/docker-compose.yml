@@ -33,7 +33,9 @@ services:
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
       CHROMA_PERSIST_DIRECTORY: /app/data/chroma_db
-      SQLITE_DATABASE_PATH: /app/data/telemetry.db
+      # File-backed SQLite keeps local development free of a database server.
+      # Production points DATABASE_URL at PostgreSQL (postgresql+asyncpg://...).
+      DATABASE_URL: sqlite+aiosqlite:////app/data/telemetry.db
 
     volumes:
       # Persistent data: ChromaDB index and SQLite telemetry survive restarts.

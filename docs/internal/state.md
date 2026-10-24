@@ -2,7 +2,7 @@
 
 **Version:** 1.2.0  
 **Sprint:** 6 (complete)  
-**Test suite:** 160 tests — all passing  
+**Test suite:** 169 tests — all passing  
 **Last updated:** 2026-09-30  
 
 > This document is a living record. Update it whenever a sprint closes or an ADR is ratified.
@@ -42,6 +42,7 @@
 | Sprint 4 | SSE streaming query (`POST /api/v1/query/stream`), document ingestion endpoint (`POST /api/v1/ingest/file`), analytics endpoint (`GET /api/v1/analytics/recent`), full 105-test suite | Complete |
 | Sprint 5 | `docs/internal/architecture.md` update (endpoints, ADR-05, ADR-06), enterprise sample datasets (`data/sample_docs/`), E2E smoke test script (`scripts/smoke_test.py`), B2B showcase `README.md` | Complete |
 | Sprint 6 | Interactive terminal demo runner (`scripts/demo_runner.py`) using Rich console panels and `httpx`; VHS tape automation (`demo.tape`) producing a zero-artifact documentation GIF; multi-format enterprise sample documents (`data/sample_docs/sla_policy.docx`, `sla_matrix.csv`, `sla_matrix.xlsx`); standardized logging with `RichHandler` and LF normalization via `.gitattributes`. Release `v1.2.0` | Complete |
+| Split 2 | Audit store moved from raw `aiosqlite` to async SQLAlchemy 2.0: `SQLAlchemyAuditRepository` and `src/storage/orm_models.py`; PostgreSQL via `asyncpg` in production, in-memory SQLite in tests; Alembic environment with migration `0001`; `DATABASE_URL` replaces `SQLITE_DATABASE_PATH` | Complete |
 
 ---
 
@@ -63,7 +64,7 @@
 | `embedding_model` | `str` | `"text-embedding-3-small"` | `EMBEDDING_MODEL` |
 | `openai_base_url` | `str \| None` | `None` | `OPENAI_BASE_URL` |
 | `chroma_persist_directory` | `str` | `"./data/chroma_db"` | `CHROMA_PERSIST_DIRECTORY` |
-| `sqlite_database_path` | `str` | `"./data/telemetry.db"` | `SQLITE_DATABASE_PATH` |
+| `database_url` | `str` | `"postgresql+asyncpg://postgres:postgres@localhost:5432/docuquery"` | `DATABASE_URL` |
 
 `model_config` uses `extra="ignore"` (not `"forbid"`). `Settings` is not an inbound API DTO; permitting unknown environment variables prevents startup failures in environments that inject additional system-level variables.
 
@@ -84,39 +85,57 @@ Both lines are required: the `dependency_overrides` dict intercepts FastAPI `Dep
 
 ### 2.2 `src/storage/audit_db.py`
 
-**Class:** `SQLiteAuditRepository(AuditRepositoryInterface)`
+**Class:** `SQLAlchemyAuditRepository(AuditRepositoryInterface)`
 
-#### Connection Management
+Table mapping lives in `src/storage/orm_models.py`: a `DeclarativeBase` subclass `Base` (its `metadata` is Alembic's autogenerate target) and `QueryTelemetryRow`, whose columns mirror `TelemetryRecord` field-for-field. `created_at` stays a string column holding the ISO-8601 UTC timestamp so it round-trips byte-for-byte on every backend.
 
-The repository holds a single `aiosqlite.Connection` as `self._connection`. The connection lifecycle is:
+#### Engine and Session Management
 
-1. **`initialize_db()`** — opens the connection, sets `row_factory = aiosqlite.Row` for named column access, executes the `CREATE TABLE IF NOT EXISTS` DDL, commits, and stores the connection on the instance.
-2. **`_get_connection()`** — internal accessor that auto-initialises if `self._connection is None`. This convenience path supports ad-hoc CLI usage; the canonical production path is explicit `initialize_db()` during lifespan startup.
-3. **`close()`** — closes and nullifies the connection. Called from the FastAPI lifespan shutdown hook.
+The constructor takes exactly one of `engine: AsyncEngine` or `session_factory: async_sessionmaker[AsyncSession]` and raises `ValueError` otherwise.
 
-#### Schema Initialisation
+1. **`initialize_db()`** — runs `Base.metadata.create_all` through a session's connection and commits. `create_all` checks for each table first, so the call is idempotent and never alters an existing table. It is a bootstrap and test convenience; production schema changes go through Alembic.
+2. **Per-operation sessions** — `log_query` and `get_recent_logs` each open a short-lived `AsyncSession` and return its connection to the pool on exit. Nothing is pinned for the application's lifetime.
+3. **`close()`** — disposes the engine. When the repository was built from a caller-supplied `session_factory`, the caller owns the engine and `close()` leaves it untouched.
 
-The DDL uses `CREATE TABLE IF NOT EXISTS`, making `initialize_db()` idempotent. Repeated calls on a file-based database across process restarts are safe. On `":memory:"` databases, each new `SQLiteAuditRepository` instance opens a fresh, isolated schema — shared-connection semantics are mandatory because `:memory:` databases are scoped to their connection handle.
+#### Backends
+
+Production connects with `postgresql+asyncpg://`. Tests use `sqlite+aiosqlite:///:memory:`; SQLAlchemy backs that engine with a `StaticPool` sharing one connection, which keeps the schema visible across sessions and the suite offline. No test depends on a running PostgreSQL server.
 
 #### Parameterisation
 
-All SQL statements use positional `?` placeholders. String interpolation in SQL is prohibited throughout this module. The tuple parameter order in `_INSERT_SQL` matches the `CREATE TABLE` column declaration order exactly, preventing silent field misalignment on schema changes.
+All statements are built with SQLAlchemy constructs (`select(...).order_by(...).limit(...)`, ORM `session.add`), so values are always bound parameters. String interpolation in SQL is prohibited throughout this module.
 
 #### Lifecycle Integration via `app.state`
 
-During lifespan startup in `src/main.py`, the initialised repository is attached to `app.state.audit_repo`:
+During lifespan startup in `src/main.py`:
 
 ```python
-audit_repo = SQLiteAuditRepository(settings)
+audit_engine = create_async_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    hide_parameters=True,
+)
+audit_repo = SQLAlchemyAuditRepository(audit_engine)
 await audit_repo.initialize_db()
 app.state.audit_repo = audit_repo
 ```
 
-Dependency injection resolves `SQLiteAuditRepository` from `request.app.state.audit_repo` via a `Depends` factory, avoiding per-request reconnection overhead.
+`pool_pre_ping` discards connections that a database restart or idle timeout silently killed. `hide_parameters` keeps bound values out of SQLAlchemy error text. Dependency injection resolves the repository from `request.app.state.audit_repo` via a `Depends` factory. Shutdown awaits `audit_repo.close()`.
 
 #### Error Handling
 
-Both `log_query` and `get_recent_logs` wrap their database calls in `try/except Exception` blocks that re-raise as `StorageError`. This ensures the presentation layer always receives a typed domain exception regardless of the underlying `aiosqlite` error.
+`initialize_db`, `log_query`, and `get_recent_logs` catch `SQLAlchemyError` and `OSError` and re-raise `StorageError` with the original exception on `__cause__`. `OSError` is included because asyncpg reports an unreachable server as a raw `ConnectionRefusedError` that SQLAlchemy does not wrap. `log_query` rolls the session back before raising.
+
+`StorageError.message` is returned to API clients, and `str()` of a SQLAlchemy error embeds the statement's bound parameters (user queries and model responses). The message therefore carries exception type names only, for example `IntegrityError(UniqueViolationError)`.
+
+#### Alembic
+
+`apps/api/alembic/` holds the migration environment (`alembic.ini` sits beside it). `env.py` reads `get_settings().database_url`, so `DATABASE_URL` redirects both the service and the migrations, and targets `Base.metadata` with `compare_type=True`. Migration `0001_initial_query_telemetry` creates `query_telemetry`; it skips creation when the table already exists so a database bootstrapped by `initialize_db()` can be adopted. Run from the repository root:
+
+```bash
+alembic -c apps/api/alembic.ini upgrade head
+alembic -c apps/api/alembic.ini check
+```
 
 ---
 
@@ -417,8 +436,8 @@ The `@asynccontextmanager` lifespan function controls the full application boot.
 | Step | Action |
 |---|---|
 | 1 | `_configure_logging(settings.log_level)` — install a single `rich.logging.RichHandler` on the root logger and intercept `uvicorn`, `uvicorn.error`, and `uvicorn.access` so domain logs and server/access logs share one layout |
-| 2 | `_provision_directories()` — idempotent `mkdir(parents=True, exist_ok=True)` for `chroma_persist_directory` and `sqlite_database_path` parent |
-| 3 | `SQLiteAuditRepository(settings).initialize_db()` — open persistent connection, create schema |
+| 2 | `_provision_directories()` — idempotent `mkdir(parents=True, exist_ok=True)` for `chroma_persist_directory` |
+| 3 | `create_async_engine(settings.database_url, ...)`, then `SQLAlchemyAuditRepository(engine).initialize_db()` — create schema if missing |
 | 4 | `app.state.audit_repo = audit_repo` — attach to application state for downstream DI |
 | 5 | `ChromaVectorStore(settings)` — lazy adapter; no I/O yet |
 | 6 | `AsyncOpenAI(api_key=settings.openai_api_key)` — shared httpx connection pool |
@@ -426,7 +445,7 @@ The `@asynccontextmanager` lifespan function controls the full application boot.
 | 8 | `RAGEngine(...)` — assemble with all dependencies |
 | 9 | `IngestionPipeline(...)` — assemble with chunker, vector store, OpenAI client |
 | 10 | Attach all services to `app.state`; `yield` — application is live |
-| 11 | `audit_repo.close()` — drain in-flight writes, close the SQLite connection |
+| 11 | `audit_repo.close()` — dispose the engine and its connection pool |
 
 The teardown hook executes whether the application shuts down gracefully (SIGTERM) or raises during request handling.
 
@@ -466,7 +485,7 @@ All routers are registered under the same `/api/v1` versioning prefix.
 
 ## 3. Test Suite Inventory
 
-All 160 tests pass with `pytest --asyncio-mode=auto`. No test requires live OpenAI credentials or a running ChromaDB server.
+All 169 tests pass with `pytest --asyncio-mode=auto`. No test requires live OpenAI credentials or a running ChromaDB server.
 
 ### `tests/unit/test_health.py` — 4 tests
 
@@ -477,14 +496,23 @@ All 160 tests pass with `pytest --asyncio-mode=auto`. No test requires live Open
 | `test_health_response_payload` | `status`, `app_name`, `version`, `environment` values are correct |
 | `test_health_response_field_types` | All fields are non-empty strings |
 
-### `tests/unit/test_audit_db.py` — 10 tests
+### `tests/unit/test_audit_db.py` — 17 tests
+
+All run against `sqlite+aiosqlite:///:memory:`.
+
+**`TestConstruction` (2)**
+
+| Test | What it verifies |
+|---|---|
+| `test_requires_exactly_one_of_engine_or_session_factory` | Supplying neither or both collaborators raises `ValueError` |
+| `test_session_factory_is_caller_owned` | A repository built from a session factory round-trips data and `close()` leaves the caller's engine usable |
 
 **`TestInitialiseDb` (2)**
 
 | Test | What it verifies |
 |---|---|
 | `test_initialize_db_does_not_raise` | `initialize_db()` completes without error on a fresh in-memory DB |
-| `test_initialize_db_is_idempotent` | A second `initialize_db()` call on a new instance does not raise |
+| `test_initialize_db_is_idempotent` | A repeated `initialize_db()` neither raises nor discards existing rows |
 
 **`TestLogQuery` (3)**
 
@@ -503,6 +531,16 @@ All 160 tests pass with `pytest --asyncio-mode=auto`. No test requires live Open
 | `test_default_limit_is_fifty` | Default `limit=50` caps at 50 rows when 60 records exist |
 | `test_ordering_is_descending_by_created_at` | Rows are returned in descending `created_at` order |
 | `test_returns_list_of_telemetry_records` | Every element is a `TelemetryRecord` instance |
+
+**`TestStorageErrors` (5)**
+
+| Test | What it verifies |
+|---|---|
+| `test_duplicate_request_id_raises_storage_error` | A primary-key collision raises `StorageError` naming the request, with a `SQLAlchemyError` on `__cause__` |
+| `test_error_message_does_not_leak_row_data` | `StorageError.message` contains neither the query nor the response text |
+| `test_repository_remains_usable_after_failed_insert` | A failed insert is rolled back and later writes and reads succeed |
+| `test_query_failure_raises_storage_error` | Reading before the schema exists raises `StorageError`, not a driver error |
+| `test_os_error_from_driver_raises_storage_error` | A raw `ConnectionRefusedError` (the asyncpg outage shape) is wrapped as `StorageError` |
 
 ### `tests/unit/test_chunker.py` — 19 tests
 
@@ -751,7 +789,7 @@ All 160 tests pass with `pytest --asyncio-mode=auto`. No test requires live Open
 | `test_html_loader_rejects_whitespace_only_html` | Markup with no body text raises `DocumentParsingError` |
 | `test_factory_resolves_html_and_htm_from_filename` | Factory resolves `.html` and `.htm` filenames |
 
-### `tests/unit/test_settings.py` — 12 tests
+### `tests/unit/test_settings.py` — 14 tests
 
 **`TestOpenAIBaseUrl` (6)**
 
@@ -763,6 +801,13 @@ All 160 tests pass with `pytest --asyncio-mode=auto`. No test requires live Open
 | `test_env_var_name_is_openai_base_url` | The field resolves from `OPENAI_BASE_URL` |
 | `test_none_is_preserved_when_env_var_absent` | Removing the env var leaves the field as `None` |
 | `test_kwarg_takes_precedence_over_none_default` | An explicit kwarg overrides the `None` default |
+
+**`TestDatabaseUrl` (2)**
+
+| Test | What it verifies |
+|---|---|
+| `test_defaults_to_local_postgres_asyncpg` | `database_url` defaults to the local PostgreSQL asyncpg URL |
+| `test_env_var_name_is_database_url` | The field resolves from `DATABASE_URL` |
 
 **`TestSettingsFieldRegressions` (6)**
 
@@ -802,17 +847,17 @@ All 160 tests pass with `pytest --asyncio-mode=auto`. No test requires live Open
 
 ---
 
-### ADR-02 — Shared Persistent `aiosqlite` Connection Across Lifespan
+### ADR-02 — Pooled Async SQLAlchemy Engine for the Audit Store
 
-**Context:** `aiosqlite` wraps SQLite with an async interface by running each database operation in a background thread. A naïve implementation might open a fresh connection for every `log_query` call. This is problematic for two reasons: (1) it imposes a per-call file open/close overhead, and (2) it is incompatible with in-memory SQLite databases, where `aiosqlite.connect(":memory:")` creates an entirely new, isolated database on each call.
+**Context:** The audit store originally held one `aiosqlite.Connection` for the process lifetime. That was the only way to share an in-memory SQLite database, but it pinned a single connection, tied the service to a file-based store, and offered no path to PostgreSQL or to versioned schema changes.
 
-**Decision:** `SQLiteAuditRepository` opens a single `aiosqlite.Connection` in `initialize_db()` and reuses it for all subsequent operations. The connection is attached to `app.state` at startup and closed explicitly in the lifespan teardown hook.
+**Decision:** `SQLAlchemyAuditRepository` is built from one `AsyncEngine` created in the lifespan from `Settings.database_url`. Every operation opens a short-lived `AsyncSession`, so connections are drawn from the engine's pool and returned on exit. Production uses `postgresql+asyncpg://`; tests use `sqlite+aiosqlite:///:memory:`. Schema changes are versioned with Alembic.
 
 **Consequences:**
-- In-memory databases work correctly in tests: the single open connection holds the schema alive for the repository's entire lifetime.
-- File-based databases benefit from connection reuse: the OS file descriptor is held open, avoiding repeated open/stat/close syscalls under moderate request rates.
-- The `_get_connection()` auto-init guard provides a safety net for ad-hoc non-lifespan usage (e.g., one-off CLI scripts) without requiring callers to manage lifecycle explicitly.
-- Thread safety: `aiosqlite` serialises all database operations through an internal `asyncio.Queue`, so the shared connection is safe to use from multiple concurrent coroutines.
+- Concurrent requests no longer serialise behind one connection; the pool bounds database concurrency.
+- In-memory databases still work in tests: SQLAlchemy backs `:memory:` SQLite engines with a `StaticPool` that shares one connection, so the suite stays offline and needs no PostgreSQL server.
+- `initialize_db()` (`metadata.create_all`) bootstraps a missing table but never alters an existing one. Existing columns evolve only through Alembic, so a deployment must run `alembic upgrade head` before starting a version that changes the schema.
+- Telemetry previously written to the SQLite file configured by `SQLITE_DATABASE_PATH` is not migrated. That setting no longer exists; the file is left in place and unread.
 
 ---
 
@@ -870,7 +915,7 @@ The SSE event format follows the [WHATWG EventSource](https://html.spec.whatwg.o
 
 **Context:** Both `IngestionPipeline` and `RAGEngine` depend on the same `ChromaVectorStore`, `AsyncOpenAI` client, and `Settings` instance. A naïve FastAPI implementation might construct these dependencies fresh for every `Depends` resolution, resulting in multiple `chromadb.PersistentClient` handles open concurrently (which triggers file-locking conflicts) and multiple `AsyncOpenAI` instances that each maintain their own `httpx` connection pool (inflating file descriptor usage and TLS handshake overhead).
 
-**Decision:** All long-lived service instances — `SQLiteAuditRepository`, `ChromaVectorStore`, `AsyncOpenAI`, `TokenBudgetManager`, `RAGEngine`, and `IngestionPipeline` — are constructed exactly once inside the `@asynccontextmanager lifespan()` function and attached to `app.state` before the application begins accepting requests. Thin `Depends` factory functions in `src/api/dependencies.py` resolve these from `request.app.state` per request.
+**Decision:** All long-lived service instances — `SQLAlchemyAuditRepository`, `ChromaVectorStore`, `AsyncOpenAI`, `TokenBudgetManager`, `RAGEngine`, and `IngestionPipeline` — are constructed exactly once inside the `@asynccontextmanager lifespan()` function and attached to `app.state` before the application begins accepting requests. Thin `Depends` factory functions in `src/api/dependencies.py` resolve these from `request.app.state` per request.
 
 **Consequences:**
 - A single `chromadb.PersistentClient` holds the exclusive write lock on the HNSW index throughout the application's lifetime.
