@@ -62,6 +62,7 @@ The toolchain is `uv`; `apps/api/uv.lock` is the single source of truth for depe
 - **Formatting check:** `uv run --directory apps/api ruff format --check .`
 - **Apply formatting:** `uv run --directory apps/api ruff format .`
 - **Start server locally:** `uv run --directory apps/api uvicorn src.main:app --reload --port 8000`
+- **Export OpenAPI schema (no server needed):** `uv run --project apps/api python -m src.export_openapi` (writes `docs/openapi.json`; `-o PATH` overrides)
 - **Alembic migrations:** `uv run --directory apps/api alembic upgrade head` (drift check: `uv run --directory apps/api alembic check`)
 - **Docker Compose:** `docker compose -f docker/docker-compose.yml --env-file .env up --build` (`--env-file` is required; Compose does not read the root `.env` for interpolation otherwise). Add `--profile chroma` and set `CHROMA_HOST=chroma` to use the standalone Chroma server. Validate with `docker compose -f docker/docker-compose.yml --env-file .env config`.
 

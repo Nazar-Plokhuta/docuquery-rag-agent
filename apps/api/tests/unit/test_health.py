@@ -11,6 +11,8 @@ from __future__ import annotations
 import pytest
 from httpx import AsyncClient
 
+from src import __version__
+
 
 @pytest.mark.asyncio
 async def test_health_returns_200(async_client: AsyncClient) -> None:
@@ -34,9 +36,11 @@ async def test_health_response_payload(async_client: AsyncClient) -> None:
 
     assert payload["status"] == "ok"
     assert payload["app_name"] == "DocuQuery RAG Agent"
-    assert payload["version"] == "2.0.0"
+    assert payload["version"] == __version__ == "2.0.0"
     # Environment is driven by the test ``Settings`` override.
     assert payload["environment"] == "development"
+    assert payload["active_model"] == "gpt-4o-mini"
+    assert payload["embedding_model"] == "text-embedding-3-small"
 
 
 @pytest.mark.asyncio
@@ -45,6 +49,13 @@ async def test_health_response_field_types(async_client: AsyncClient) -> None:
     response = await async_client.get("/api/v1/health/")
     payload = response.json()
 
-    for field in ("status", "app_name", "version", "environment"):
+    for field in (
+        "status",
+        "app_name",
+        "version",
+        "environment",
+        "active_model",
+        "embedding_model",
+    ):
         assert isinstance(payload[field], str), f"Field '{field}' must be a string"
         assert payload[field], f"Field '{field}' must not be empty"

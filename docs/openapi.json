@@ -1,0 +1,503 @@
+{
+  "components": {
+    "schemas": {
+      "AnalyticsResponse": {
+        "description": "Page of recent telemetry records returned by the analytics endpoint.\n\nAttributes:\n    records: Ordered list of ``TelemetryRecord`` instances, sorted by\n        descending ``created_at`` (most recent first), bounded by the\n        ``limit`` query parameter.\n    total_count: Number of records in this response page.  Equals\n        ``len(records)`` and is included for client-side convenience.",
+        "properties": {
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/TelemetryRecord"
+            },
+            "title": "Records",
+            "type": "array"
+          },
+          "total_count": {
+            "title": "Total Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "records",
+          "total_count"
+        ],
+        "title": "AnalyticsResponse",
+        "type": "object"
+      },
+      "Body_ingest_file_api_v1_ingest_file_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_ingest_file_api_v1_ingest_file_post",
+        "type": "object"
+      },
+      "Citation": {
+        "description": "Source attribution for a single factual claim in a RAG response.\n\nInstances are produced by the RAG engine from the metadata of each\nretrieved chunk that survived score filtering and token budgeting.\n\nAttributes:\n    source: Document identifier — typically the file stem or filename\n        from which the chunk was derived.\n    section: Nearest preceding Markdown heading at ingestion time, or an\n        empty string when the chunk's source document contains no headings.\n    chunk_id: Deterministic chunk identifier in the form\n        ``{document_id}#c{index:04d}``, enabling exact traceability back\n        to the indexed segment.",
+        "properties": {
+          "chunk_id": {
+            "title": "Chunk Id",
+            "type": "string"
+          },
+          "section": {
+            "title": "Section",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "section",
+          "chunk_id"
+        ],
+        "title": "Citation",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "description": "Typed response payload returned by the health-check endpoint.",
+        "properties": {
+          "active_model": {
+            "title": "Active Model",
+            "type": "string"
+          },
+          "app_name": {
+            "title": "App Name",
+            "type": "string"
+          },
+          "embedding_model": {
+            "title": "Embedding Model",
+            "type": "string"
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "app_name",
+          "version",
+          "environment",
+          "active_model",
+          "embedding_model"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "IngestResponse": {
+        "description": "Confirmation payload returned after a successful document ingestion.\n\nAttributes:\n    status: Ingestion outcome descriptor — always ``\"success\"`` on the\n        happy path; a domain exception propagates to the error handler\n        on failure.\n    filename: Sanitized basename of the uploaded document (directory\n        components stripped), echoed for client-side correlation.\n    chunks_ingested: Total number of ``DocumentChunk`` objects indexed into\n        the vector store. Zero indicates the document was empty or contained\n        only whitespace.",
+        "properties": {
+          "chunks_ingested": {
+            "title": "Chunks Ingested",
+            "type": "integer"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "filename",
+          "chunks_ingested"
+        ],
+        "title": "IngestResponse",
+        "type": "object"
+      },
+      "QueryRequest": {
+        "additionalProperties": false,
+        "description": "Validated inbound payload for a RAG query.\n\nAttributes:\n    query: The user question. Must be a non-empty string.\n    top_k: Maximum number of candidate chunks to retrieve from the vector\n        store before score filtering. Bounded to [1, 20] to prevent\n        runaway retrieval costs and context window overflow.\n    score_threshold: Minimum cosine similarity score a retrieved chunk must\n        achieve to be injected into the LLM prompt. Chunks below this\n        threshold are treated as irrelevant and discarded.",
+        "properties": {
+          "query": {
+            "description": "Non-empty user question string.",
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          },
+          "score_threshold": {
+            "default": 0.3,
+            "description": "Minimum cosine similarity score for chunk inclusion (0.0–1.0).",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Score Threshold",
+            "type": "number"
+          },
+          "top_k": {
+            "default": 4,
+            "description": "Maximum candidate chunks to retrieve (1–20).",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "QueryRequest",
+        "type": "object"
+      },
+      "QueryResponse": {
+        "description": "Structured response returned by the non-streaming RAG query endpoint.\n\nAttributes:\n    query: The original user question, echoed for client-side correlation.\n    answer: Grounded LLM response text, or the deterministic fallback\n        refusal phrase when retrieved context is insufficient.\n    citations: Source attributions for every chunk injected into the prompt.\n    latency_ms: End-to-end wall-clock duration in milliseconds.\n    total_tokens: Combined prompt and completion token count for cost attribution.",
+        "properties": {
+          "answer": {
+            "title": "Answer",
+            "type": "string"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/Citation"
+            },
+            "title": "Citations",
+            "type": "array"
+          },
+          "latency_ms": {
+            "title": "Latency Ms",
+            "type": "number"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          },
+          "total_tokens": {
+            "title": "Total Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query",
+          "answer",
+          "citations",
+          "latency_ms",
+          "total_tokens"
+        ],
+        "title": "QueryResponse",
+        "type": "object"
+      },
+      "TelemetryRecord": {
+        "description": "Audit log entry capturing the full lifecycle of a single RAG query.\n\nEvery completed RAG request produces one ``TelemetryRecord``, which is\npersisted to the SQLite audit store for observability and cost attribution.\n\nAttributes:\n    request_id: UUID-based trace identifier for cross-service correlation.\n    query_text: The raw user query submitted to the RAG pipeline.\n    response_text: The grounded LLM response returned to the caller.\n    latency_ms: End-to-end wall-clock duration in milliseconds.\n    prompt_tokens: Tokens consumed by the system and user prompt.\n    completion_tokens: Tokens generated in the LLM completion.\n    total_tokens: Sum of prompt and completion token counts.\n    model_name: LLM identifier used to generate the response (e.g. ``gpt-4o-mini``).\n    created_at: ISO-8601 UTC timestamp of the query (e.g. ``2026-09-19T09:00:00Z``).",
+        "properties": {
+          "completion_tokens": {
+            "title": "Completion Tokens",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "latency_ms": {
+            "title": "Latency Ms",
+            "type": "number"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          },
+          "prompt_tokens": {
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "query_text": {
+            "title": "Query Text",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "response_text": {
+            "title": "Response Text",
+            "type": "string"
+          },
+          "total_tokens": {
+            "title": "Total Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "request_id",
+          "query_text",
+          "response_text",
+          "latency_ms",
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens",
+          "model_name",
+          "created_at"
+        ],
+        "title": "TelemetryRecord",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Enterprise-grade Retrieval-Augmented Generation service providing document ingestion, semantic search, and grounded LLM responses.",
+    "title": "DocuQuery RAG Agent API",
+    "version": "2.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/analytics/recent": {
+      "get": {
+        "description": "Return the most recent RAG query telemetry records from the audit log, ordered by descending creation time.",
+        "operationId": "get_recent_analytics_api_v1_analytics_recent_get",
+        "parameters": [
+          {
+            "description": "Maximum number of records to return (1–1000).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Maximum number of records to return (1–1000).",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recent telemetry records",
+        "tags": [
+          "Analytics"
+        ]
+      }
+    },
+    "/api/v1/health/": {
+      "get": {
+        "description": "Returns service metadata. No downstream dependencies are checked.",
+        "operationId": "health_check_api_v1_health__get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Liveness probe",
+        "tags": [
+          "Health"
+        ]
+      }
+    },
+    "/api/v1/ingest/file": {
+      "post": {
+        "description": "Upload a ``.md``, ``.txt``, ``.pdf``, ``.docx``, ``.csv``, ``.xlsx``, ``.html``, or ``.htm`` file. The service extracts text, chunks, embeds, and indexes the content into the vector store, then returns the chunk count.",
+        "operationId": "ingest_file_api_v1_ingest_file_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ingest_file_api_v1_ingest_file_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingest a document",
+        "tags": [
+          "Ingestion"
+        ]
+      }
+    },
+    "/api/v1/query/": {
+      "post": {
+        "description": "Retrieve relevant document chunks, assemble a token-budgeted prompt, and return the grounded LLM answer with source citations in a single JSON response.",
+        "operationId": "query_endpoint_api_v1_query__post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "RAG query — synchronous",
+        "tags": [
+          "Query"
+        ]
+      }
+    },
+    "/api/v1/query/stream": {
+      "post": {
+        "description": "Stream the grounded LLM response token-by-token via Server-Sent Events. Each event carries a single token delta. The stream terminates with ``[DONE]``.",
+        "operationId": "stream_query_endpoint_api_v1_query_stream_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "RAG query — SSE streaming",
+        "tags": [
+          "Query"
+        ]
+      }
+    }
+  }
+}

@@ -64,6 +64,14 @@ class Settings(BaseSettings):
     litellm_drop_params: bool = True
 
     # ------------------------------------------------------------------
+    # HTTP / CORS
+    # ------------------------------------------------------------------
+    # Comma-separated browser origins allowed to call the API cross-origin, e.g.
+    # `http://localhost:3000,http://127.0.0.1:3000`. Empty (default) installs no CORS
+    # middleware, so the API stays same-origin only.
+    cors_allow_origins: str = ""
+
+    # ------------------------------------------------------------------
     # Vector store (ChromaDB)
     # ------------------------------------------------------------------
     # Local file mode (default) writes to `chroma_persist_directory`. Setting

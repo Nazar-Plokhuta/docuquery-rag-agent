@@ -19,15 +19,17 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from rich.logging import RichHandler
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from src import __version__
 from src.api.routes import analytics as analytics_router
 from src.api.routes import health as health_router
 from src.api.routes import ingestion as ingestion_router
 from src.api.routes import query as query_router
-from src.config.settings import get_settings
+from src.config.settings import Settings, get_settings
 from src.core.exceptions import (
     AppException,
     DocumentParsingError,
@@ -191,7 +193,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="DocuQuery RAG Agent API",
-    version="2.0.0",
+    version=__version__,
     description=(
         "Enterprise-grade Retrieval-Augmented Generation service providing "
         "document ingestion, semantic search, and grounded LLM responses."
@@ -201,6 +203,38 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
     lifespan=lifespan,
 )
+
+
+# ---------------------------------------------------------------------------
+# CORS (opt-in)
+# ---------------------------------------------------------------------------
+
+
+def parse_cors_origins(settings: Settings) -> list[str]:
+    """Split the comma-separated ``CORS_ALLOW_ORIGINS`` value into clean origins."""
+    return [o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()]
+
+
+def install_cors(target: FastAPI, origins: list[str]) -> None:
+    """Attach ``CORSMiddleware`` to ``target`` only when origins are configured.
+
+    The API is a same-origin service by default; the web console is the sole
+    cross-origin consumer. Credentials stay disabled (no cookies or auth headers
+    are used) and methods/headers are limited to what the console actually sends,
+    so a misconfigured origin list widens exposure as little as possible.
+    """
+    if not origins:
+        return
+    target.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "Accept"],
+    )
+
+
+install_cors(app, parse_cors_origins(get_settings()))
 
 
 # ---------------------------------------------------------------------------

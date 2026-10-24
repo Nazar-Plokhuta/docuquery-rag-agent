@@ -11,6 +11,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
 
+from src import __version__
 from src.config.settings import Settings, get_settings
 
 router = APIRouter(prefix="/health", tags=["Health"])
@@ -25,6 +26,8 @@ class HealthResponse(BaseModel):
     app_name: str
     version: str
     environment: str
+    active_model: str
+    embedding_model: str
 
 
 @router.get(
@@ -47,6 +50,8 @@ async def health_check(
     return HealthResponse(
         status="ok",
         app_name="DocuQuery RAG Agent",
-        version="2.0.0",
+        version=__version__,
         environment=settings.app_env,
+        active_model=settings.openai_model,
+        embedding_model=settings.embedding_model,
     )
