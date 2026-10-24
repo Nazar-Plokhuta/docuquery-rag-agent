@@ -35,7 +35,9 @@ def _settings(**overrides: object) -> Settings:
         "embedding_model": "text-embedding-3-small",
         "database_url": "sqlite+aiosqlite:///:memory:",
     }
-    return Settings(**{**base, **overrides})  # type: ignore[arg-type]
+    # `_env_file=None` keeps the shared repo-root `.env` from leaking into any field a test
+    # does not set, so results are identical on a developer machine and in CI.
+    return Settings(**{**base, **overrides}, _env_file=None)  # type: ignore[arg-type]
 
 
 class TestProviderCredentials:
@@ -227,8 +229,13 @@ class TestResolveProvider:
 class TestAuditLLMConfiguration:
     """Startup audit: report combinations that are certain to fail, never raise."""
 
-    def test_flags_bare_embedding_model_with_placeholder_openai_key(self) -> None:
+    def test_flags_bare_embedding_model_with_placeholder_openai_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The reported deployment: OpenRouter chat model, bare embedding model, no OpenAI key."""
+        # The audit reads provider keys from os.environ (not Settings); without this the
+        # chat model adds a second, unrelated problem on machines that have no `.env`.
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-dummy")
         settings = _settings(
             openai_api_key=OPENAI_PLACEHOLDER_API_KEY,
             openai_model="openrouter/google/gemini-2.5-flash",
