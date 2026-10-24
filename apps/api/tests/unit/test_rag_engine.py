@@ -20,9 +20,14 @@ import litellm
 import pytest
 
 from src.config.settings import Settings
-from src.core.exceptions import LLMAuthenticationError, LLMRateLimitError, LLMUnavailableError
+from src.core.exceptions import (
+    LLMAuthenticationError,
+    LLMRateLimitError,
+    LLMUnavailableError,
+    StorageError,
+)
 from src.core.models import Citation, DocumentChunk, RAGResult, RetrievalResult, TelemetryRecord
-from src.core.rag.engine import RAGEngine
+from src.core.rag.engine import DEFAULT_SCORE_THRESHOLD, DEFAULT_TOP_K, RAGEngine
 from src.core.rag.prompts import FALLBACK_REFUSAL_MESSAGE
 from src.core.rag.token_counter import TokenBudgetManager
 
@@ -109,6 +114,24 @@ def litellm_mocks(monkeypatch: pytest.MonkeyPatch) -> LiteLLMMocks:
     return LiteLLMMocks(acompletion=acompletion, aembedding=aembedding)
 
 
+def _delta_chunk(text: str | None) -> MagicMock:
+    """Build a streaming chunk carrying a content delta and no usage block."""
+    chunk = MagicMock()
+    chunk.choices[0].delta.content = text
+    chunk.usage = None
+    return chunk
+
+
+def _usage_chunk(prompt: int, completion: int, total: int) -> MagicMock:
+    """Build the usage-only trailer chunk emitted under ``include_usage``."""
+    chunk = MagicMock()
+    chunk.choices = []
+    chunk.usage.prompt_tokens = prompt
+    chunk.usage.completion_tokens = completion
+    chunk.usage.total_tokens = total
+    return chunk
+
+
 def _build_engine(
     *,
     vector_store: MagicMock | None = None,
@@ -123,6 +146,8 @@ def _build_engine(
     """
     mock_vs = vector_store or MagicMock()
     mock_ar = audit_repo or MagicMock()
+    if audit_repo is None:
+        mock_ar.log_query = AsyncMock()
     mock_tb = token_budget or MagicMock(spec=TokenBudgetManager)
     cfg = settings or _make_settings()
 
@@ -397,9 +422,7 @@ class TestRAGEngineStream:
 
         async def _mock_stream() -> AsyncGenerator[MagicMock, None]:
             for token_text in expected_tokens:
-                chunk = MagicMock()
-                chunk.choices[0].delta.content = token_text
-                yield chunk
+                yield _delta_chunk(token_text)
 
         litellm_mocks.acompletion.return_value = _mock_stream()
 
@@ -410,6 +433,7 @@ class TestRAGEngineStream:
         assert received == expected_tokens
         call_kwargs = litellm_mocks.acompletion.await_args.kwargs
         assert call_kwargs["stream"] is True
+        assert call_kwargs["stream_options"] == {"include_usage": True}
         assert call_kwargs["temperature"] == 0.0
 
     async def test_stream_query_skips_none_delta_content(self, litellm_mocks: LiteLLMMocks) -> None:
@@ -423,13 +447,9 @@ class TestRAGEngineStream:
 
         async def _mock_stream_with_none() -> AsyncGenerator[MagicMock, None]:
             # First chunk has None content (role announcement in streaming format).
-            none_chunk = MagicMock()
-            none_chunk.choices[0].delta.content = None
-            yield none_chunk
+            yield _delta_chunk(None)
             # Subsequent chunks carry actual text.
-            real_chunk = MagicMock()
-            real_chunk.choices[0].delta.content = "Hello"
-            yield real_chunk
+            yield _delta_chunk("Hello")
 
         litellm_mocks.acompletion.return_value = _mock_stream_with_none()
 
@@ -451,12 +471,8 @@ class TestRAGEngineStream:
         mock_vs.similarity_search = AsyncMock(return_value=[retrieval_result])
 
         async def _stream() -> AsyncGenerator[MagicMock, None]:
-            real_chunk = MagicMock()
-            real_chunk.choices[0].delta.content = "Hi"
-            yield real_chunk
-            usage_chunk = MagicMock()
-            usage_chunk.choices = []
-            yield usage_chunk
+            yield _delta_chunk("Hi")
+            yield _usage_chunk(10, 2, 12)
 
         litellm_mocks.acompletion.return_value = _stream()
 
@@ -541,9 +557,7 @@ class TestRAGEngineProviderFailures:
         engine, _ = _engine_with_one_chunk()
 
         async def _stream_that_dies() -> AsyncGenerator[MagicMock, None]:
-            chunk = MagicMock()
-            chunk.choices[0].delta.content = "Partial"
-            yield chunk
+            yield _delta_chunk("Partial")
             raise litellm.APIConnectionError(
                 message="connection reset",
                 model="m",
@@ -559,3 +573,134 @@ class TestRAGEngineProviderFailures:
                 received.append(token)
 
         assert received == ["Partial"]
+
+
+# ---------------------------------------------------------------------------
+# Streaming telemetry, prompt provenance and retrieval defaults
+# ---------------------------------------------------------------------------
+
+
+def _streaming_engine(*, estimated_tokens: int = 7) -> tuple[RAGEngine, MagicMock, MagicMock]:
+    """Engine with one qualifying chunk; returns (engine, audit_repo, token_budget)."""
+    retrieval_result = _make_retrieval_result(score=0.9)
+    mock_tb = MagicMock(spec=TokenBudgetManager)
+    mock_tb.fit_contexts_to_budget.return_value = [retrieval_result]
+    mock_tb.count_tokens.return_value = estimated_tokens
+    engine, mock_vs, mock_ar, _ = _build_engine(token_budget=mock_tb)
+    mock_vs.similarity_search = AsyncMock(return_value=[retrieval_result])
+    return engine, mock_ar, mock_tb
+
+
+class TestStreamTelemetry:
+    """``stream_query`` must audit every completed stream, like ``query`` does."""
+
+    async def test_logs_provider_usage_after_last_token(self, litellm_mocks: LiteLLMMocks) -> None:
+        engine, mock_ar, _ = _streaming_engine()
+
+        async def _stream() -> AsyncGenerator[MagicMock, None]:
+            yield _delta_chunk("Four ")
+            yield _delta_chunk("nines.")
+            yield _usage_chunk(120, 5, 125)
+
+        litellm_mocks.acompletion.return_value = _stream()
+
+        received = [t async for t in engine.stream_query("What is the SLA?")]
+
+        assert received == ["Four ", "nines."]
+        mock_ar.log_query.assert_awaited_once()
+        record: TelemetryRecord = mock_ar.log_query.call_args[0][0]
+        assert record.query_text == "What is the SLA?"
+        assert record.response_text == "Four nines."
+        assert (record.prompt_tokens, record.completion_tokens, record.total_tokens) == (
+            120,
+            5,
+            125,
+        )
+        assert record.latency_ms > 0
+        assert record.model_name == "gpt-4o-mini"
+
+    async def test_estimates_tokens_when_provider_omits_usage(
+        self, litellm_mocks: LiteLLMMocks
+    ) -> None:
+        engine, mock_ar, _ = _streaming_engine(estimated_tokens=7)
+
+        async def _stream() -> AsyncGenerator[MagicMock, None]:
+            yield _delta_chunk("Answer.")
+
+        litellm_mocks.acompletion.return_value = _stream()
+
+        _ = [t async for t in engine.stream_query("Q?")]
+
+        record: TelemetryRecord = mock_ar.log_query.call_args[0][0]
+        # Two prompt messages (system + user) plus the completion, 7 tokens each.
+        assert record.prompt_tokens == 14
+        assert record.completion_tokens == 7
+        assert record.total_tokens == 21
+
+    async def test_tolerates_null_usage_fields(self, litellm_mocks: LiteLLMMocks) -> None:
+        engine, mock_ar, _ = _streaming_engine(estimated_tokens=3)
+
+        async def _stream() -> AsyncGenerator[MagicMock, None]:
+            yield _delta_chunk("Answer.")
+            yield _usage_chunk(None, None, None)  # type: ignore[arg-type]
+
+        litellm_mocks.acompletion.return_value = _stream()
+
+        _ = [t async for t in engine.stream_query("Q?")]
+
+        record: TelemetryRecord = mock_ar.log_query.call_args[0][0]
+        assert record.total_tokens == record.prompt_tokens + record.completion_tokens > 0
+
+    async def test_refusal_fast_path_logs_zero_token_record(
+        self, litellm_mocks: LiteLLMMocks
+    ) -> None:
+        engine, mock_vs, mock_ar, _ = _build_engine()
+        mock_vs.similarity_search = AsyncMock(return_value=[_make_retrieval_result(score=0.01)])
+
+        received = [t async for t in engine.stream_query("Unanswerable?")]
+
+        assert received == [FALLBACK_REFUSAL_MESSAGE]
+        record: TelemetryRecord = mock_ar.log_query.call_args[0][0]
+        assert record.response_text == FALLBACK_REFUSAL_MESSAGE
+        assert record.total_tokens == 0
+
+    async def test_storage_failure_does_not_break_a_delivered_stream(
+        self, litellm_mocks: LiteLLMMocks, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        engine, mock_ar, _ = _streaming_engine()
+        mock_ar.log_query = AsyncMock(side_effect=StorageError("db down"))
+
+        async def _stream() -> AsyncGenerator[MagicMock, None]:
+            yield _delta_chunk("Done.")
+
+        litellm_mocks.acompletion.return_value = _stream()
+
+        received = [t async for t in engine.stream_query("Q?")]
+
+        assert received == ["Done."]
+        assert "Telemetry for a streamed response was not persisted" in caplog.text
+
+
+class TestPromptProvenanceAndDefaults:
+    """Chunks reach the model with real provenance; defaults favour recall."""
+
+    async def test_prompt_labels_each_chunk_with_source_and_section(
+        self, litellm_mocks: LiteLLMMocks
+    ) -> None:
+        engine, _, _ = _streaming_engine()
+
+        async def _stream() -> AsyncGenerator[MagicMock, None]:
+            yield _delta_chunk("ok")
+
+        litellm_mocks.acompletion.return_value = _stream()
+
+        _ = [t async for t in engine.stream_query("Q?")]
+
+        user_message = litellm_mocks.acompletion.await_args.kwargs["messages"][1]["content"]
+        assert (
+            "[Source: tech-spec, Section: Architecture]\nThe system uses async I/O" in user_message
+        )
+
+    def test_defaults_are_recall_oriented(self) -> None:
+        assert DEFAULT_TOP_K == 6
+        assert DEFAULT_SCORE_THRESHOLD == 0.2

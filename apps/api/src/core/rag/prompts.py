@@ -10,6 +10,10 @@ It enforces two invariants at prompt-design time rather than post-processing:
    citation token in the exact format ``[Source: <source>, Section: <section>]``.
    This format is enforced by prompt instruction, not regex substitution.
 
+Grounding is deliberately language-agnostic: the retrieval gate is tuned for recall
+(multilingual embeddings score cross-language matches low), so the prompt is the
+precision gate and must refuse when the context is irrelevant.
+
 No I/O, no driver imports, and no business logic belong here.
 """
 
@@ -32,25 +36,45 @@ FALLBACK_REFUSAL_MESSAGE: str = (
 
 _SYSTEM_PROMPT: str = f"""You are a precise document question-answering assistant.
 
-You MUST follow these rules strictly and without exception:
+Follow these rules:
 
-1. Base your answer EXCLUSIVELY on the context chunks provided in the user message.
-   Do not use any external knowledge, assumptions, training data, or extrapolations
-   beyond what is explicitly stated in the provided context.
+1. Base every statement ONLY on the context chunks provided in the user message.
+   Never use outside knowledge, and never invent facts, figures, names or sources.
 
-2. If the provided context does not contain sufficient information to answer the
-   question, output EXACTLY the following phrase and nothing else:
+2. The question and the context may be written in different languages. Match them by
+   meaning, and write the answer in the language of the question. Translating,
+   paraphrasing and combining facts from several chunks is expected; adding facts
+   that no chunk states is forbidden.
+
+3. Answer whenever the context contains information that addresses the question,
+   even if it is only partial. State clearly which part of the question the context
+   does not cover instead of refusing the whole question.
+
+4. Only when the context contains nothing relevant to the question, output EXACTLY the
+   following phrase and nothing else:
    {FALLBACK_REFUSAL_MESSAGE}
 
-3. Do not fabricate facts, invent sources, hallucinate details, or speculate
-   beyond the information present in the context.
-
-4. After every factual claim you make, you MUST immediately append a citation in
-   this exact format (no deviations):
+5. After every factual claim, append the citation of the chunk it came from, copied
+   verbatim from that chunk's header line, in this format:
    [Source: <source>, Section: <section>]
-   where <source> is the document filename and <section> is the Markdown section
-   heading from which the information was derived. If the section is unknown,
-   use an empty string for <section>."""
+   Never cite a chunk that does not support the claim."""
+
+
+def format_context_block(source: str, section: str, content: str) -> str:
+    """Prefix a chunk with a provenance header the model can copy into citations.
+
+    Without the header the model sees only anonymous text and has no truthful
+    ``<source>``/``<section>`` to cite, so it would have to fabricate them.
+
+    Args:
+        source: Document identifier recorded at ingestion time.
+        section: Section label recorded at ingestion time; may be empty.
+        content: Raw chunk text.
+
+    Returns:
+        The chunk text preceded by its ``[Source: ..., Section: ...]`` header line.
+    """
+    return f"[Source: {source}, Section: {section}]\n{content}"
 
 
 def build_rag_prompt(

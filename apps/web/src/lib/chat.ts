@@ -4,12 +4,12 @@ import type { QueryResponse } from "@/lib/api/client";
 export const FALLBACK_REFUSAL_PREFIX =
   "I am sorry, but the provided documentation does not contain sufficient information";
 
-export const TOP_K_RANGE = { min: 1, max: 20, default: 4 } as const;
+export const TOP_K_RANGE = { min: 1, max: 20, default: 6 } as const;
 export const SCORE_THRESHOLD_RANGE = {
   min: 0,
   max: 1,
   step: 0.05,
-  default: 0.3,
+  default: 0.2,
 } as const;
 
 export type ChatMode = "stream" | "inspect";

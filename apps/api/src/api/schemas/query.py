@@ -11,6 +11,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.core.models import Citation
+from src.core.rag.engine import DEFAULT_SCORE_THRESHOLD, DEFAULT_TOP_K
 
 
 class QueryRequest(BaseModel):
@@ -30,13 +31,13 @@ class QueryRequest(BaseModel):
 
     query: str = Field(min_length=1, description="Non-empty user question string.")
     top_k: int = Field(
-        default=4,
+        default=DEFAULT_TOP_K,
         ge=1,
         le=20,
         description="Maximum candidate chunks to retrieve (1–20).",
     )
     score_threshold: float = Field(
-        default=0.3,
+        default=DEFAULT_SCORE_THRESHOLD,
         ge=0.0,
         le=1.0,
         description="Minimum cosine similarity score for chunk inclusion (0.0–1.0).",

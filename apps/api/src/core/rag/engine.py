@@ -22,17 +22,28 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 import litellm
 
 from src.config.settings import Settings
+from src.core.exceptions import StorageError
 from src.core.interfaces import AuditRepositoryInterface, VectorStoreInterface
 from src.core.llm import embed_texts, provider_credentials, translate_litellm_errors
 from src.core.models import Citation, RAGResult, RetrievalResult, TelemetryRecord
-from src.core.rag.prompts import FALLBACK_REFUSAL_MESSAGE, build_rag_prompt
+from src.core.rag.prompts import FALLBACK_REFUSAL_MESSAGE, build_rag_prompt, format_context_block
 from src.core.rag.token_counter import TokenBudgetManager
 
 logger = logging.getLogger(__name__)
+
+# Recall-oriented retrieval defaults shared by the engine and the API schema.
+# Measured with text-embedding-3-small: relevant Russian/Ukrainian queries against
+# an English or Ukrainian corpus score ~0.29-0.47 and even short English questions
+# can peak at ~0.33, while off-topic queries stay below ~0.25. A 0.3 cut-off
+# therefore discards genuine hits; 0.2 keeps them and leaves refusal of irrelevant
+# context to the grounding prompt.
+DEFAULT_TOP_K: int = 6
+DEFAULT_SCORE_THRESHOLD: float = 0.2
 
 
 class RAGEngine:
@@ -110,7 +121,77 @@ class RAGEngine:
             query_embedding=query_embedding,
             top_k=top_k,
         )
-        return [r for r in raw_results if r.score >= score_threshold]
+        filtered = [r for r in raw_results if r.score >= score_threshold]
+        logger.info(
+            "Retrieval: candidates=%d kept=%d top_score=%.3f score_threshold=%.2f",
+            len(raw_results),
+            len(filtered),
+            max((r.score for r in raw_results), default=0.0),
+            score_threshold,
+        )
+        return filtered
+
+    def _build_messages(
+        self, query_text: str, budgeted_chunks: list[RetrievalResult]
+    ) -> list[dict[str, str]]:
+        """Assemble the prompt with each chunk labelled by its provenance."""
+        contexts = [
+            format_context_block(
+                source=str(result.chunk.metadata.get("document_id", result.chunk.document_id)),
+                section=str(result.chunk.metadata.get("section", "")),
+                content=result.chunk.content,
+            )
+            for result in budgeted_chunks
+        ]
+        return build_rag_prompt(query=query_text, retrieved_contexts=contexts)
+
+    def _resolve_usage(
+        self, usage: Any, messages: list[dict[str, str]], answer: str
+    ) -> tuple[int, int, int]:
+        """Return ``(prompt, completion, total)`` tokens, estimating when the provider omits them.
+
+        Streams only report usage when the provider honours ``include_usage``;
+        some gateways drop it, and the audit columns are non-nullable. Falling
+        back to a tiktoken estimate keeps the record writable and approximately
+        right instead of silently losing the whole telemetry row.
+        """
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        completion_tokens = getattr(usage, "completion_tokens", None)
+        if not isinstance(prompt_tokens, int) or not isinstance(completion_tokens, int):
+            prompt_tokens = sum(self._token_budget.count_tokens(m["content"]) for m in messages)
+            completion_tokens = self._token_budget.count_tokens(answer)
+            logger.info("Provider reported no stream usage; token counts are tiktoken estimates.")
+        total_tokens = getattr(usage, "total_tokens", None)
+        if not isinstance(total_tokens, int):
+            total_tokens = prompt_tokens + completion_tokens
+        return prompt_tokens, completion_tokens, total_tokens
+
+    async def _log_stream_telemetry(
+        self,
+        query_text: str,
+        response_text: str,
+        latency_ms: float,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+    ) -> None:
+        """Persist telemetry once the answer has already been delivered to the client.
+
+        Unlike ``query()``, a storage fault cannot become an HTTP error here: the
+        status line and every token are already sent. It is logged at ERROR so the
+        loss is visible instead of being appended to the SSE body as a bogus error.
+        """
+        try:
+            await self._log_telemetry(
+                query_text=query_text,
+                response_text=response_text,
+                latency_ms=latency_ms,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            )
+        except StorageError as exc:
+            logger.error("Telemetry for a streamed response was not persisted: %s", exc.message)
 
     def _extract_citations(self, budgeted_chunks: list[RetrievalResult]) -> list[Citation]:
         """Derive structured Citation objects from chunk metadata.
@@ -174,8 +255,8 @@ class RAGEngine:
     async def query(
         self,
         query_text: str,
-        top_k: int = 4,
-        score_threshold: float = 0.3,
+        top_k: int = DEFAULT_TOP_K,
+        score_threshold: float = DEFAULT_SCORE_THRESHOLD,
     ) -> RAGResult:
         """Execute a non-streaming RAG query and return a structured ``RAGResult``.
 
@@ -233,8 +314,7 @@ class RAGEngine:
             )
 
         budgeted_chunks = self._token_budget.fit_contexts_to_budget(filtered_chunks)
-        contexts = [chunk.chunk.content for chunk in budgeted_chunks]
-        messages = build_rag_prompt(query=query_text, retrieved_contexts=contexts)
+        messages = self._build_messages(query_text, budgeted_chunks)
 
         with translate_litellm_errors(self._settings.openai_model, "chat completion"):
             completion = await litellm.acompletion(
@@ -290,8 +370,8 @@ class RAGEngine:
     async def stream_query(
         self,
         query_text: str,
-        top_k: int = 4,
-        score_threshold: float = 0.3,
+        top_k: int = DEFAULT_TOP_K,
+        score_threshold: float = DEFAULT_SCORE_THRESHOLD,
     ) -> AsyncGenerator[str, None]:
         """Execute a streaming RAG query, yielding token deltas as they arrive.
 
@@ -300,9 +380,12 @@ class RAGEngine:
         fallback refusal phrase is yielded as a single string and the generator
         terminates immediately — no LLM call is made.
 
-        Telemetry is not logged for streaming queries because provider
-        streams do not return a usage object by default.
-        Streaming usage accounting is deferred to a future sprint.
+        Telemetry is persisted after the last token, in the engine's own
+        short-lived audit session (never a request-scoped one, which is closed by
+        then). Token usage comes from the final ``include_usage`` chunk, with a
+        tiktoken estimate as fallback. A client that disconnects mid-stream
+        closes the generator before this point, so such partial answers are not
+        audited.
 
         Args:
             query_text: The raw user query.
@@ -319,6 +402,7 @@ class RAGEngine:
                 first token or between tokens.
             StorageError: If the vector store query fails.
         """
+        start_time = time.perf_counter()
         filtered_chunks = await self._retrieve_and_filter(query_text, top_k, score_threshold)
 
         if not filtered_chunks:
@@ -329,11 +413,18 @@ class RAGEngine:
                 score_threshold,
             )
             yield FALLBACK_REFUSAL_MESSAGE
+            await self._log_stream_telemetry(
+                query_text=query_text,
+                response_text=FALLBACK_REFUSAL_MESSAGE,
+                latency_ms=(time.perf_counter() - start_time) * 1000.0,
+                prompt_tokens=0,
+                completion_tokens=0,
+                total_tokens=0,
+            )
             return
 
         budgeted_chunks = self._token_budget.fit_contexts_to_budget(filtered_chunks)
-        contexts = [chunk.chunk.content for chunk in budgeted_chunks]
-        messages = build_rag_prompt(query=query_text, retrieved_contexts=contexts)
+        messages = self._build_messages(query_text, budgeted_chunks)
 
         # The guard spans the consuming loop as well: a provider can fail after the
         # stream opened, and that fault must surface as a domain error too.
@@ -343,13 +434,42 @@ class RAGEngine:
                 messages=messages,
                 temperature=0.0,
                 stream=True,
+                stream_options={"include_usage": True},
                 **provider_credentials(self._settings.openai_model, self._settings),
             )
 
+            answer_parts: list[str] = []
+            usage: Any = None
             async for chunk in stream:
-                # Providers may emit trailing chunks without choices (e.g. usage-only).
+                # The usage-only trailer arrives as a chunk with empty ``choices``.
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    usage = chunk_usage
                 if not chunk.choices:
                     continue
                 delta_content: str | None = chunk.choices[0].delta.content
                 if delta_content:
+                    answer_parts.append(delta_content)
                     yield delta_content
+
+        answer = "".join(answer_parts)
+        prompt_tokens, completion_tokens, total_tokens = self._resolve_usage(
+            usage, messages, answer
+        )
+        latency_ms = (time.perf_counter() - start_time) * 1000.0
+        await self._log_stream_telemetry(
+            query_text=query_text,
+            response_text=answer or FALLBACK_REFUSAL_MESSAGE,
+            latency_ms=latency_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
+        logger.info(
+            "Stream RAG query completed. chunks=%d prompt_tokens=%d completion_tokens=%d "
+            "latency_ms=%.1f",
+            len(budgeted_chunks),
+            prompt_tokens,
+            completion_tokens,
+            latency_ms,
+        )

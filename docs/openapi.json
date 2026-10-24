@@ -148,7 +148,7 @@
             "type": "string"
           },
           "score_threshold": {
-            "default": 0.3,
+            "default": 0.2,
             "description": "Minimum cosine similarity score for chunk inclusion (0.0–1.0).",
             "maximum": 1.0,
             "minimum": 0.0,
@@ -156,7 +156,7 @@
             "type": "number"
           },
           "top_k": {
-            "default": 4,
+            "default": 6,
             "description": "Maximum candidate chunks to retrieve (1–20).",
             "maximum": 20.0,
             "minimum": 1.0,

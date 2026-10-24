@@ -11,7 +11,7 @@ Verifies:
 
 from __future__ import annotations
 
-from src.core.rag.prompts import FALLBACK_REFUSAL_MESSAGE, build_rag_prompt
+from src.core.rag.prompts import FALLBACK_REFUSAL_MESSAGE, build_rag_prompt, format_context_block
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -171,3 +171,17 @@ class TestUserMessageContextFraming:
         content = self._user_content()
         for ctx in _CONTEXTS:
             assert ctx in content
+
+
+class TestFormatContextBlock:
+    """Provenance headers give the model real values to cite."""
+
+    def test_header_precedes_content(self) -> None:
+        block = format_context_block("sla_policy", "Uptime", "99.9% monthly.")
+        assert block == "[Source: sla_policy, Section: Uptime]\n99.9% monthly."
+
+    def test_system_prompt_allows_cross_language_answers_and_partial_answers(self) -> None:
+        system = build_rag_prompt(_QUERY, _CONTEXTS)[0]["content"]
+        assert "different languages" in system
+        assert "language of the question" in system
+        assert "partial" in system

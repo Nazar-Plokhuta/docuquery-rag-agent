@@ -221,13 +221,13 @@ export interface components {
             /**
              * Score Threshold
              * @description Minimum cosine similarity score for chunk inclusion (0.0–1.0).
-             * @default 0.3
+             * @default 0.2
              */
             score_threshold: number;
             /**
              * Top K
              * @description Maximum candidate chunks to retrieve (1–20).
-             * @default 4
+             * @default 6
              */
             top_k: number;
         };
