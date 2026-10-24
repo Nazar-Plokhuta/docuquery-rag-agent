@@ -20,7 +20,6 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
-from openai import AsyncOpenAI
 from rich.logging import RichHandler
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -36,6 +35,7 @@ from src.core.exceptions import (
     StorageError,
     UnsupportedFileTypeError,
 )
+from src.core.llm import configure_litellm
 from src.core.rag.engine import RAGEngine
 from src.core.rag.token_counter import TokenBudgetManager
 from src.ingestion.chunker import TokenSlidingWindowChunker
@@ -109,16 +109,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     3. Create the async SQLAlchemy engine and bootstrap the audit repository.
     4. Construct the ChromaDB vector store adapter (lazy I/O — no network call
        yet; the collection is opened on first actual read/write).
-    5. Construct the async OpenAI client.
+    5. Apply global LiteLLM flags (``drop_params``, telemetry off).
     6. Construct the token budget manager (loads tiktoken BPE vocabulary).
     7. Assemble the ``RAGEngine`` with all injected dependencies.
     8. Assemble the ``IngestionPipeline`` with chunker, vector store, and
-       OpenAI client.
+       settings.
     9. Attach all services to ``app.state`` for DI resolution per request.
 
     Shutdown:
     - Dispose the audit engine and its connection pool.
-    - ChromaDB, OpenAI client, and tiktoken hold no persistent connections
+    - ChromaDB, LiteLLM, and tiktoken hold no persistent connections
       requiring explicit teardown.
     """
     settings = get_settings()
@@ -149,16 +149,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     vector_store = ChromaVectorStore(settings)
     app.state.vector_store = vector_store
 
-    # ── OpenAI client ────────────────────────────────────────────────────────
-    # A single ``AsyncOpenAI`` instance is reused across all requests to share
-    # the underlying httpx connection pool and avoid per-request TLS handshakes.
-    # ``base_url`` is conditionally forwarded only when explicitly configured to
-    # avoid passing ``None`` to the SDK, which some versions treat as an error.
-    openai_kwargs: dict[str, str] = {"api_key": settings.openai_api_key}
-    if settings.openai_base_url is not None:
-        openai_kwargs["base_url"] = settings.openai_base_url
-        logger.info("OpenAI client using custom base URL: %s", settings.openai_base_url)
-    openai_client = AsyncOpenAI(**openai_kwargs)  # type: ignore[arg-type]
+    # ── LLM abstraction ──────────────────────────────────────────────────────
+    # LiteLLM keeps no client object: flags are process-global and provider
+    # connections are managed per call, so there is nothing to inject or close.
+    configure_litellm(settings)
 
     # ── Domain / core layer ──────────────────────────────────────────────────
     token_budget = TokenBudgetManager()
@@ -166,7 +160,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     rag_engine = RAGEngine(
         vector_store=vector_store,
         audit_repo=audit_repo,
-        openai_client=openai_client,
         token_budget=token_budget,
         settings=settings,
     )
@@ -177,7 +170,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     ingestion_pipeline = IngestionPipeline(
         chunker=chunker,
         vector_store=vector_store,
-        openai_client=openai_client,
         settings=settings,
     )
     app.state.ingestion_pipeline = ingestion_pipeline

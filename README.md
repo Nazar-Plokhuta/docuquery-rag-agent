@@ -3,7 +3,7 @@
 [![Release](https://img.shields.io/badge/RELEASE-V1.2.0-blue?style=for-the-badge&logo=github)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/releases/tag/v1.2.0)
 [![CI Pipeline](https://img.shields.io/badge/CI%20PIPELINE-PASSING-brightgreen?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/PYTHON-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/TESTS-169%20PASSING-44cc11?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent)
+[![Tests](https://img.shields.io/badge/TESTS-183%20PASSING-44cc11?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent)
 
 > **Enterprise-grade Retrieval-Augmented Generation microservice.** Strict grounding. Zero hallucinations. Full async. Production-ready from day one.
 
@@ -67,8 +67,8 @@ flowchart TD
 
     subgraph Gateways["External Gateways"]
         direction TB
-        OAI["OpenAI Official Platform\ngpt-4o-mini · text-embedding-3-small"]
-        ORT["OpenRouter / vLLM / LocalAI\n(OpenAI-compatible via OPENAI_BASE_URL)"]
+        OAI["OpenAI · Anthropic · OpenRouter · ...\nrouted by LiteLLM"]
+        ORT["vLLM / LocalAI\n(OpenAI-compatible via OPENAI_BASE_URL)"]
     end
 
     Client -->|"HTTPS / SSE"| Presentation
@@ -86,13 +86,13 @@ flowchart TD
 ```
 POST /api/v1/query/
         │
-        ├─ 1. Embed query          → OpenAI text-embedding-3-small
+        ├─ 1. Embed query          → litellm.aembedding (default text-embedding-3-small)
         ├─ 2. Retrieve top-k       → ChromaDB HNSW cosine similarity
         ├─ 3. Score filter         → discard chunks below score_threshold
         ├─ 4. Fast-path refusal    → if no chunks pass → return FALLBACK_REFUSAL_MESSAGE
         ├─ 5. Token budgeting      → TokenBudgetManager (cl100k_base, greedy descending score)
         ├─ 6. Prompt assembly      → build_rag_prompt() with anti-hallucination system prompt
-        ├─ 7. LLM completion       → OpenAI GPT-4o-mini, temperature=0.0
+        ├─ 7. LLM completion       → litellm.acompletion (default gpt-4o-mini), temperature=0.0
         ├─ 8. Citation extraction  → one Citation per budgeted chunk
         └─ 9. Telemetry logging    → TelemetryRecord → PostgreSQL audit trail
 ```
@@ -134,7 +134,7 @@ Every network call, database operation, and filesystem interaction is `async`/`a
 
 ### Clean Architecture with Dependency Inversion
 
-All service instances (vector store, OpenAI client, audit repository, RAG engine) are constructed **once** at application startup and shared across requests via `app.state`. Routers depend on abstract interfaces, not on concrete adapters. Swapping ChromaDB for Weaviate requires changing one file.
+All service instances (vector store, audit repository, RAG engine, ingestion pipeline) are constructed **once** at application startup and shared across requests via `app.state`. Routers depend on abstract interfaces, not on concrete adapters. Swapping ChromaDB for Weaviate requires changing one file.
 
 ### Universal Multi-Format Document Ingestion
 
@@ -358,17 +358,17 @@ curl -s -X POST http://localhost:8000/api/v1/query/ \
 
 ## Multi-Gateway Support
 
-DocuQuery targets **any OpenAI-compatible inference gateway** with zero codebase changes. The `OPENAI_BASE_URL` setting is the single control point:
+All LLM completions and embeddings are routed through [LiteLLM](https://docs.litellm.ai) (`litellm.acompletion` / `litellm.aembedding`). The provider is selected by the model identifier alone; no code change is needed.
 
-| Gateway | `OPENAI_BASE_URL` | `OPENAI_API_KEY` |
+| Target | `OPENAI_MODEL` | Credentials |
 |---|---|---|
-| OpenAI (default) | *(unset)* | `sk-...` |
-| [OpenRouter](https://openrouter.ai) | `https://openrouter.ai/api/v1` | OpenRouter key |
-| vLLM (self-hosted) | `http://localhost:8001/v1` | `EMPTY` |
-| LocalAI | `http://localhost:8080/v1` | `sk-unused` |
-| Azure OpenAI | `https://<resource>.openai.azure.com/openai` | Azure key |
+| OpenAI (default) | `gpt-4o-mini` | `OPENAI_API_KEY` |
+| Anthropic | `anthropic/claude-sonnet-4-5` | `ANTHROPIC_API_KEY` |
+| [OpenRouter](https://openrouter.ai) | `openrouter/<vendor>/<model>` | `OPENROUTER_API_KEY` |
+| vLLM / LocalAI / any OpenAI-compatible gateway | `openai/<served-model>` | `OPENAI_API_KEY` + `OPENAI_BASE_URL` (e.g. `http://localhost:8001/v1`) |
+| Azure OpenAI | `azure/<deployment>` | `AZURE_API_KEY`, `AZURE_API_BASE`, `AZURE_API_VERSION` |
 
-Both LLM completions (`chat.completions`) and embedding calls (`embeddings.create`) are routed through the same base URL. No adapter swap, no code change — only environment variables.
+`OPENAI_API_KEY` and `OPENAI_BASE_URL` are forwarded **only** to OpenAI-routed models, so they never leak to another vendor. Other providers read their own environment variables (LiteLLM also loads a `.env` file). Use an explicit `provider/` prefix for non-OpenAI models. `EMBEDDING_MODEL` follows the same rules, and `LITELLM_DROP_PARAMS=true` (default) lets LiteLLM drop request parameters a provider does not support.
 
 ---
 
@@ -442,7 +442,7 @@ curl -s -X POST http://localhost:8000/api/v1/query/ \
 ### Running the Test Suite
 
 ```bash
-# Run full automated test suite (169 tests)
+# Run full automated test suite (183 tests)
 uv run --directory apps/api pytest -v
 
 # Run only unit tests
@@ -458,7 +458,7 @@ uv run --project apps/api python scripts/verify_all_loaders.py
 uv run --project apps/api python scripts/demo_runner.py
 ```
 
-All tests are fully isolated: no live OpenAI credentials, no running ChromaDB server, and no network access are required. Mocks cover all external boundaries.
+All tests are fully isolated: no live LLM credentials, no running ChromaDB server, and no network access are required. Mocks cover all external boundaries.
 
 ### Linting and Formatting
 
@@ -502,10 +502,11 @@ The shared `.env` at the repository root is located by absolute path, so it is f
 
 | Variable | Default | Description |
 |---|---|---|
-| `OPENAI_API_KEY` | *(required)* | OpenAI API key (or your gateway's key) |
-| `OPENAI_MODEL` | `gpt-4o-mini` | LLM model for completions |
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
-| `OPENAI_BASE_URL` | *(unset — uses OpenAI platform)* | Custom OpenAI-compatible gateway URL |
+| `OPENAI_API_KEY` | *(required)* | API key for OpenAI-routed models (or your OpenAI-compatible gateway's key) |
+| `OPENAI_MODEL` | `gpt-4o-mini` | LiteLLM chat model identifier (e.g. `anthropic/claude-sonnet-4-5`) |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | LiteLLM embedding model identifier |
+| `OPENAI_BASE_URL` | *(unset — uses OpenAI platform)* | Custom OpenAI-compatible gateway URL (pair with an `openai/<model>` identifier) |
+| `LITELLM_DROP_PARAMS` | `true` | Drop request parameters unsupported by the target provider |
 | `APP_ENV` | `development` | Runtime environment (`development`, `staging`, `production`) |
 | `APP_PORT` | `8000` | Server port |
 | `LOG_LEVEL` | `INFO` | Root log level |
@@ -519,7 +520,7 @@ The shared `.env` at the repository root is located by absolute path, so it is f
 > uv run --directory apps/api alembic check          # fail when models and migrations drift
 > ```
 
-> **OpenRouter & Custom Gateways:** Set `OPENAI_BASE_URL=https://openrouter.ai/api/v1` and `OPENAI_API_KEY=<your-openrouter-key>` to route all LLM and embedding calls through OpenRouter or any other OpenAI-compatible provider (vLLM, LocalAI, Azure OpenAI). When unset, the service targets the official OpenAI platform. No code changes required.
+> **Other providers & gateways:** Set `OPENAI_MODEL=anthropic/claude-sonnet-4-5` with `ANTHROPIC_API_KEY`, `OPENAI_MODEL=openrouter/<vendor>/<model>` with `OPENROUTER_API_KEY`, or `OPENAI_MODEL=openai/<model>` with `OPENAI_BASE_URL` for vLLM/LocalAI. Anthropic has no embedding endpoint, so keep `EMBEDDING_MODEL` on an embedding-capable provider. No code changes required.
 
 ---
 

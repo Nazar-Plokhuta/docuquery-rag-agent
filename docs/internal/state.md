@@ -2,7 +2,7 @@
 
 **Version:** 1.2.0  
 **Sprint:** 6 (complete)  
-**Test suite:** 169 tests — all passing  
+**Test suite:** 183 tests — all passing  
 **Last updated:** 2026-09-30  
 
 > This document is a living record. Update it whenever a sprint closes or an ADR is ratified.
@@ -60,10 +60,11 @@
 | `app_env` | `Literal["development", "staging", "production"]` | `"development"` | `APP_ENV` |
 | `app_port` | `int` | `8000` | `APP_PORT` |
 | `log_level` | `Literal["DEBUG","INFO","WARNING","ERROR","CRITICAL"]` | `"INFO"` | `LOG_LEVEL` |
-| `openai_api_key` | `str` | `"sk-placeholder"` | `OPENAI_API_KEY` |
-| `openai_model` | `str` | `"gpt-4o-mini"` | `OPENAI_MODEL` |
+| `openai_api_key` | `str` | `"sk-placeholder"` | `OPENAI_API_KEY` (forwarded to OpenAI-routed models only) |
+| `openai_model` | `str` | `"gpt-4o-mini"` | `OPENAI_MODEL` (LiteLLM identifier, e.g. `anthropic/claude-sonnet-4-5`) |
 | `embedding_model` | `str` | `"text-embedding-3-small"` | `EMBEDDING_MODEL` |
 | `openai_base_url` | `str \| None` | `None` | `OPENAI_BASE_URL` |
+| `litellm_drop_params` | `bool` | `True` | `LITELLM_DROP_PARAMS` |
 | `chroma_persist_directory` | `str` | `"./data/chroma_db"` | `CHROMA_PERSIST_DIRECTORY` |
 | `database_url` | `str` | `"postgresql+asyncpg://postgres:postgres@localhost:5432/docuquery"` | `DATABASE_URL` |
 
@@ -278,33 +279,33 @@ def __init__(
     self,
     chunker: TokenSlidingWindowChunker,
     vector_store: VectorStoreInterface,
-    openai_client: AsyncOpenAI,
     settings: Settings,
 ) -> None:
 ```
 
-The pipeline depends on abstractions (`VectorStoreInterface`), not on `ChromaVectorStore` directly. In tests, a stub `VectorStoreInterface` implementation replaces the real adapter.
+Embeddings are produced through LiteLLM (`src/core/llm.py::embed_texts`), so the pipeline holds no provider client. The pipeline depends on abstractions (`VectorStoreInterface`), not on `ChromaVectorStore` directly. In tests, a stub `VectorStoreInterface` implementation replaces the real adapter.
 
-#### Batch Embedding with OpenAI `text-embedding-3-small`
+#### Batch Embedding via LiteLLM
 
-Embedding generation is batched to respect OpenAI API rate limits:
+Embedding generation is batched to respect provider rate limits (default model `text-embedding-3-small`):
 
 ```
 _EMBEDDING_BATCH_SIZE = 100
 ```
 
-The OpenAI Embeddings API accepts up to 2 048 inputs per call. The service caps batches at 100 to stay well within burst rate-limit budgets and to bound individual request latency. For a document producing `N` chunks, the pipeline issues `ceil(N / 100)` embedding API calls.
+The OpenAI embeddings endpoint accepts up to 2 048 inputs per call. The service caps batches at 100 to stay well within burst rate-limit budgets and to bound individual request latency. For a document producing `N` chunks, the pipeline issues `ceil(N / 100)` embedding API calls.
 
 The `_embed_batch` helper calls:
 
 ```python
-await self._openai.embeddings.create(
+await litellm.aembedding(
     model=self._settings.embedding_model,
     input=texts,
+    **provider_credentials(...),
 )
 ```
 
-The API guarantees response items are returned in the same order as the input list, so `response.data[i].embedding` corresponds to `texts[i]` without additional sorting.
+LiteLLM returns items in input order, so `response.data[i]` corresponds to `texts[i]` without additional sorting. Items may be dicts or objects depending on the provider; `embed_texts` normalises both.
 
 #### Ingest Flow
 
@@ -382,13 +383,13 @@ This greedy approach is optimal for the common case where all chunks are similar
 
 | Stage | Implementation |
 |---|---|
-| Query embedding | `AsyncOpenAI.embeddings.create` |
+| Query embedding | `litellm.aembedding` (via `embed_texts`) |
 | Top-k retrieval | `VectorStoreInterface.similarity_search` |
 | Score threshold filtering | Inline list comprehension (`score >= threshold`) |
 | Fast-path refusal | Return `FALLBACK_REFUSAL_MESSAGE` with zero tokens if no chunks survive |
 | Token budgeting | `TokenBudgetManager.fit_contexts_to_budget` |
 | Prompt construction | `build_rag_prompt(query, contexts)` |
-| LLM completion | `AsyncOpenAI.chat.completions.create(temperature=0.0)` |
+| LLM completion | `litellm.acompletion(temperature=0.0)` |
 | Citation extraction | `_extract_citations(budgeted_chunks)` |
 | Telemetry logging | `AuditRepositoryInterface.log_query(TelemetryRecord)` |
 
@@ -396,9 +397,9 @@ This greedy approach is optimal for the common case where all chunks are similar
 
 #### Streaming Pipeline
 
-`RAGEngine.stream_query()` is an `async def` generator. The retrieval, filtering, and budgeting stages are identical to `query()`. After prompt construction, it calls `chat.completions.create(stream=True)` and yields each `delta.content` string from the async stream. `None` deltas (produced by the first streaming chunk which carries only the role announcement) are silently skipped.
+`RAGEngine.stream_query()` is an `async def` generator. The retrieval, filtering, and budgeting stages are identical to `query()`. After prompt construction, it calls `litellm.acompletion(stream=True)` and yields each `delta.content` string from the async stream. `None` deltas (produced by the first streaming chunk which carries only the role announcement) and chunks with empty `choices` are silently skipped. The SSE wire format is unchanged: `data: {"token": "..."}\n\n` events followed by `data: [DONE]\n\n`.
 
-Telemetry is not logged for streaming queries because the OpenAI streaming API does not include a usage object in the default `stream=True` response.
+Telemetry is not logged for streaming queries because provider streams do not include a usage object in the default `stream=True` response.
 
 ---
 
@@ -441,10 +442,10 @@ The `@asynccontextmanager` lifespan function controls the full application boot.
 | 3 | `create_async_engine(settings.database_url, ...)`, then `SQLAlchemyAuditRepository(engine).initialize_db()` — create schema if missing |
 | 4 | `app.state.audit_repo = audit_repo` — attach to application state for downstream DI |
 | 5 | `ChromaVectorStore(settings)` — lazy adapter; no I/O yet |
-| 6 | `AsyncOpenAI(api_key=settings.openai_api_key)` — shared httpx connection pool |
+| 6 | `configure_litellm(settings)` — set global `litellm.drop_params` and disable LiteLLM telemetry (no client object is constructed) |
 | 7 | `TokenBudgetManager()` — loads `cl100k_base` BPE vocabulary once |
 | 8 | `RAGEngine(...)` — assemble with all dependencies |
-| 9 | `IngestionPipeline(...)` — assemble with chunker, vector store, OpenAI client |
+| 9 | `IngestionPipeline(...)` — assemble with chunker, vector store, settings |
 | 10 | Attach all services to `app.state`; `yield` — application is live |
 | 11 | `audit_repo.close()` — dispose the engine and its connection pool |
 
@@ -486,7 +487,7 @@ All routers are registered under the same `/api/v1` versioning prefix.
 
 ## 3. Test Suite Inventory
 
-All 169 tests pass with `uv run --directory apps/api pytest` (`asyncio_mode = auto` is set in `pyproject.toml`). No test requires live OpenAI credentials or a running ChromaDB server.
+All 183 tests pass with `uv run --directory apps/api pytest` (`asyncio_mode = auto` is set in `pyproject.toml`). No test requires live LLM credentials or a running ChromaDB server.
 
 ### `tests/unit/test_health.py` — 4 tests
 
@@ -790,6 +791,10 @@ All run against `sqlite+aiosqlite:///:memory:`.
 | `test_html_loader_rejects_whitespace_only_html` | Markup with no body text raises `DocumentParsingError` |
 | `test_factory_resolves_html_and_htm_from_filename` | Factory resolves `.html` and `.htm` filenames |
 
+### `tests/unit/test_llm.py` — 10 tests / `tests/unit/test_ingestion_pipeline.py` — 3 tests
+
+Cover LiteLLM credential routing (OpenAI credentials reach only OpenAI-routed models), `configure_litellm` global flags, dict/object embedding-item normalisation, and ingestion batching via a patched `litellm.aembedding`. `tests/conftest.py` sets `LITELLM_LOCAL_MODEL_COST_MAP=True` and installs an autouse guard that makes any un-mocked `litellm.acompletion`/`aembedding` call fail.
+
 ### `tests/unit/test_settings.py` — 14 tests
 
 **`TestOpenAIBaseUrl` (6)**
@@ -866,7 +871,7 @@ All run against `sqlite+aiosqlite:///:memory:`.
 
 **Context:** An earlier design considered embedding the dense vector inside `DocumentChunk` as an additional field. This was rejected because: (1) `DocumentChunk.metadata` is constrained to `dict[str, str | int]` for ChromaDB compatibility — a `list[float]` embedding would violate this constraint and require a parallel `metadata` structure; (2) `DocumentChunk` is a domain model shared between ingestion and retrieval contexts; forcing it to carry a mutable embedding couples the ingestion concern to all consumers of the type.
 
-**Decision:** Pre-computed embedding vectors are passed as a separate `embeddings: list[list[float]] | None` parameter on `VectorStoreInterface.add_documents`. The `IngestionPipeline` calls the OpenAI Embeddings API, collects the resulting vectors, and passes them alongside the `DocumentChunk` sequence in a single `add_documents` call.
+**Decision:** Pre-computed embedding vectors are passed as a separate `embeddings: list[list[float]] | None` parameter on `VectorStoreInterface.add_documents`. The `IngestionPipeline` calls the embedding model via LiteLLM, collects the resulting vectors, and passes them alongside the `DocumentChunk` sequence in a single `add_documents` call.
 
 **Consequences:**
 - `DocumentChunk` remains a pure, primitive-typed domain model. It can be stored, logged, and passed across layers without carrying embedding infrastructure.
@@ -914,12 +919,12 @@ The SSE event format follows the [WHATWG EventSource](https://html.spec.whatwg.o
 
 ### ADR-06 — Single-Instance Lifespan Dependency Graph Shared Between Ingestion and Query Engines
 
-**Context:** Both `IngestionPipeline` and `RAGEngine` depend on the same `ChromaVectorStore`, `AsyncOpenAI` client, and `Settings` instance. A naïve FastAPI implementation might construct these dependencies fresh for every `Depends` resolution, resulting in multiple `chromadb.PersistentClient` handles open concurrently (which triggers file-locking conflicts) and multiple `AsyncOpenAI` instances that each maintain their own `httpx` connection pool (inflating file descriptor usage and TLS handshake overhead).
+**Context:** Both `IngestionPipeline` and `RAGEngine` depend on the same `ChromaVectorStore` and `Settings` instance. A naïve FastAPI implementation might construct these dependencies fresh for every `Depends` resolution, resulting in multiple `chromadb.PersistentClient` handles open concurrently (which triggers file-locking conflicts).
 
-**Decision:** All long-lived service instances — `SQLAlchemyAuditRepository`, `ChromaVectorStore`, `AsyncOpenAI`, `TokenBudgetManager`, `RAGEngine`, and `IngestionPipeline` — are constructed exactly once inside the `@asynccontextmanager lifespan()` function and attached to `app.state` before the application begins accepting requests. Thin `Depends` factory functions in `src/api/dependencies.py` resolve these from `request.app.state` per request.
+**Decision:** All long-lived service instances — `SQLAlchemyAuditRepository`, `ChromaVectorStore`, `TokenBudgetManager`, `RAGEngine`, and `IngestionPipeline` — are constructed exactly once inside the `@asynccontextmanager lifespan()` function and attached to `app.state` before the application begins accepting requests. Thin `Depends` factory functions in `src/api/dependencies.py` resolve these from `request.app.state` per request.
 
 **Consequences:**
 - A single `chromadb.PersistentClient` holds the exclusive write lock on the HNSW index throughout the application's lifetime.
-- A single `AsyncOpenAI` instance shares one `httpx.AsyncClient` and its underlying connection pool across all concurrent requests, reducing TLS handshake overhead and file descriptor usage under load.
+- LiteLLM is process-global: no provider client is constructed or injected; `configure_litellm` applies its flags once at startup.
 - Documents indexed via `POST /api/v1/ingest/file` are immediately queryable via `POST /api/v1/query/` without any cache invalidation, replica lag, or consistency delay — both paths share the same `ChromaVectorStore` instance.
 - `TokenBudgetManager` loads the `cl100k_base` tiktoken BPE vocabulary once and caches the `tiktoken.Encoding` object on the instance, avoiding repeated BPE vocabulary deserialisation across requests.

@@ -20,7 +20,7 @@ Deliver production-ready, maintainable, strictly typed code adhering to high-rel
 
 ## Clean Architecture Boundaries
 Dependencies point strictly inward: `api` → `core`, `ingestion` → `core`, `storage` → `core`.
-- **Presentation Layer (`src/api`):** Controllers, routers, request/response DTOs, SSE streaming. Zero direct DB/Chroma/OpenAI calls here.
+- **Presentation Layer (`src/api`):** Controllers, routers, request/response DTOs, SSE streaming. Zero direct DB/Chroma/LLM-provider calls here.
 - **Domain & Core Layer (`src/core`):** Domain entities, interfaces/ABCs, business logic, RAG orchestration, and token bounding.
 - **Ingestion Layer (`src/ingestion`):** Text parsing, loaders, deterministic chunking, metadata enrichment.
 - **Storage Layer (`src/storage`):** Concrete adapters for ChromaDB and SQLite audit trails.
@@ -41,6 +41,7 @@ Dependencies point strictly inward: `api` → `core`, `ingestion` → `core`, `s
 ---
 
 ## RAG & Anti-Hallucination Guardrails
+- **Provider Abstraction (LiteLLM):** All chat completions and embeddings go through `litellm.acompletion` / `litellm.aembedding` (helpers in `src/core/llm.py`). Never import a provider SDK (`openai`, `anthropic`) directly. Model names are LiteLLM identifiers (`gpt-4o-mini`, `anthropic/claude-sonnet-4-5`, `openrouter/<vendor>/<model>`); `OPENAI_API_KEY`/`OPENAI_BASE_URL` are forwarded to OpenAI-routed models only, other providers read their own env vars. Global flags (`drop_params`, telemetry off) are set once in the lifespan via `configure_litellm`.
 - **Strict Grounding:** System prompts must strictly forbid fabricating facts. If retrieved context is insufficient or similarity falls below threshold, return the deterministic fallback refusal phrase without calling LLM completion.
 - **Mandatory Citations:** Every factual claim must cite source metadata: ``.
 - **Token Budgeting:** Never inject unbounded context. Always measure, truncate, and bound context payloads using `tiktoken` (`cl100k_base`).
@@ -68,7 +69,7 @@ The toolchain is `uv`; `apps/api/uv.lock` is the single source of truth for depe
 
 ## Operational Workflow for Claude Code
 1. **Zero Regressions:** After any file modification, run `uv run --directory apps/api pytest` to guarantee all tests continue to pass (100% green suite).
-2. **Offline Tests:** Do not introduce unmocked live network calls to OpenAI or external endpoints in tests.
+2. **Offline Tests:** Do not introduce unmocked live network calls to LLM providers or external endpoints in tests. Patch `litellm.acompletion` / `litellm.aembedding`; `tests/conftest.py` installs an autouse guard that fails any un-mocked call.
 3. **Concise Execution:** Lead directly with concrete code changes, diffs, and command execution.
 
 ---

@@ -1,7 +1,7 @@
 """End-to-end document ingestion pipeline.
 
 Orchestrates the full ingestion flow:
-    read file → chunk text → batch embed via OpenAI → index in vector store.
+    read file → chunk text → batch embed via LiteLLM → index in vector store.
 
 The pipeline is stateless beyond its constructor-injected dependencies, making
 it trivially testable in isolation with stub implementations of each interface.
@@ -13,17 +13,16 @@ import asyncio
 import logging
 from pathlib import Path
 
-from openai import AsyncOpenAI
-
 from src.config.settings import Settings
 from src.core.interfaces import VectorStoreInterface
+from src.core.llm import embed_texts
 from src.ingestion.chunker import TokenSlidingWindowChunker
 from src.ingestion.loaders.factory import DocumentLoaderFactory
 
 logger = logging.getLogger(__name__)
 
-# OpenAI embeddings endpoint accepts at most 2048 inputs per call; we cap at 100
-# to stay well within rate-limit budgets and keep individual request latencies low.
+# Embedding endpoints accept at most 2048 inputs per call (OpenAI); we cap at 100
+# to stay well within provider rate-limit budgets and keep individual request latencies low.
 _EMBEDDING_BATCH_SIZE: int = 100
 
 
@@ -34,20 +33,18 @@ class IngestionPipeline:
         chunker: Configured ``TokenSlidingWindowChunker`` instance.
         vector_store: Concrete vector store adapter implementing
             ``VectorStoreInterface``.
-        openai_client: Async OpenAI client used for embedding generation.
-        settings: Application settings (provides ``embedding_model`` identifier).
+        settings: Application settings (provides ``embedding_model`` identifier
+            and provider credentials for LiteLLM).
     """
 
     def __init__(
         self,
         chunker: TokenSlidingWindowChunker,
         vector_store: VectorStoreInterface,
-        openai_client: AsyncOpenAI,
         settings: Settings,
     ) -> None:
         self._chunker = chunker
         self._vector_store = vector_store
-        self._openai = openai_client
         self._settings = settings
 
     # ------------------------------------------------------------------
@@ -63,12 +60,8 @@ class IngestionPipeline:
         Returns:
             List of dense embedding vectors in the same order as ``texts``.
         """
-        response = await self._openai.embeddings.create(
-            model=self._settings.embedding_model,
-            input=texts,
-        )
-        # The API guarantees items are returned in the same order as the input.
-        return [item.embedding for item in response.data]
+        # LiteLLM preserves input order in the returned embedding items.
+        return await embed_texts(texts, self._settings)
 
     # ------------------------------------------------------------------
     # Public API
@@ -80,7 +73,7 @@ class IngestionPipeline:
         Processing steps:
         1. Read raw bytes and decode/extract text via a format-specific loader.
         2. Segment into overlapping token-bounded chunks.
-        3. Call the OpenAI Embeddings API in batches of at most
+        3. Call the embedding model (via LiteLLM) in batches of at most
            ``_EMBEDDING_BATCH_SIZE`` chunks.
         4. Persist each batch of (chunk, embedding) pairs via the vector store.
 

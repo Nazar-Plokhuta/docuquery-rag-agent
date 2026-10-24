@@ -26,7 +26,8 @@ class Settings(BaseSettings):
 
     Fields are grouped by concern:
     - **Application runtime**: env label, serving port, log verbosity.
-    - **OpenAI**: API key, chat model, and embedding model identifiers.
+    - **LLM (LiteLLM)**: OpenAI credentials, chat/embedding model identifiers, and
+      LiteLLM behaviour flags.
     - **Vector store**: ChromaDB persistence directory.
     - **Relational store**: SQLAlchemy async URL for the telemetry / audit trail.
     """
@@ -46,14 +47,21 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
     # ------------------------------------------------------------------
-    # OpenAI
+    # LLM routing (LiteLLM)
     # ------------------------------------------------------------------
+    # Model names are LiteLLM identifiers and may carry a provider prefix, e.g.
+    # `gpt-4o-mini`, `anthropic/claude-sonnet-4-5`, `openrouter/<vendor>/<model>`.
+    # `openai_api_key`/`openai_base_url` are forwarded only to OpenAI-routed models;
+    # other providers read their own env vars (`ANTHROPIC_API_KEY`, ...).
     openai_api_key: str = "sk-placeholder"
     openai_model: str = "gpt-4o-mini"
     embedding_model: str = "text-embedding-3-small"
-    # Optional custom OpenAI-compatible gateway (e.g. OpenRouter, vLLM, LocalAI).
-    # When None, the AsyncOpenAI client defaults to the official OpenAI platform.
+    # Optional custom OpenAI-compatible gateway (vLLM, LocalAI, ...). Pair it with an
+    # `openai/<model>` identifier; when None, requests go to the official OpenAI API.
     openai_base_url: str | None = None
+    # Drop request parameters a provider does not support instead of raising, so one
+    # call signature stays valid across backends.
+    litellm_drop_params: bool = True
 
     # ------------------------------------------------------------------
     # Vector store (ChromaDB)

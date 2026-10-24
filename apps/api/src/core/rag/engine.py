@@ -10,7 +10,7 @@ Design constraints respected here:
 - The event loop is never blocked: embedding and completion calls are
   already async; ChromaDB blocking calls are hidden behind VectorStoreInterface.
 - Token budgeting is enforced before every LLM call — no unbounded context
-  is ever forwarded to the OpenAI API.
+  is ever forwarded to the LLM provider.
 - Anti-hallucination refusal fires in the fast path (before the LLM call)
   when retrieved context is empty, and is enforced by prompt design otherwise.
 """
@@ -23,10 +23,11 @@ import uuid
 from collections.abc import AsyncGenerator, Sequence
 from datetime import UTC, datetime
 
-from openai import AsyncOpenAI
+import litellm
 
 from src.config.settings import Settings
 from src.core.interfaces import AuditRepositoryInterface, VectorStoreInterface
+from src.core.llm import embed_texts, provider_credentials
 from src.core.models import Citation, RAGResult, RetrievalResult, TelemetryRecord
 from src.core.rag.prompts import FALLBACK_REFUSAL_MESSAGE, build_rag_prompt
 from src.core.rag.token_counter import TokenBudgetManager
@@ -38,12 +39,12 @@ class RAGEngine:
     """Orchestrates the full retrieval-augmented generation pipeline.
 
     Responsibilities:
-    - Embed the user query using the configured OpenAI embedding model.
+    - Embed the user query using the configured embedding model (routed via LiteLLM).
     - Retrieve semantically similar chunks from the vector store.
     - Filter low-confidence chunks by score threshold.
     - Apply token budget constraints to the surviving candidate set.
     - Build a grounded, citation-enforcing prompt via ``build_rag_prompt``.
-    - Call the OpenAI Chat Completions API (blocking or streaming).
+    - Call the chat model through ``litellm.acompletion`` (blocking or streaming).
     - Persist a ``TelemetryRecord`` to the audit repository.
     - Return a fully structured ``RAGResult`` with citations and usage stats.
 
@@ -55,7 +56,6 @@ class RAGEngine:
         self,
         vector_store: VectorStoreInterface,
         audit_repo: AuditRepositoryInterface,
-        openai_client: AsyncOpenAI,
         token_budget: TokenBudgetManager,
         settings: Settings,
     ) -> None:
@@ -64,13 +64,11 @@ class RAGEngine:
         Args:
             vector_store: Abstract vector store adapter for similarity search.
             audit_repo: Abstract audit repository for telemetry persistence.
-            openai_client: Async OpenAI client for embeddings and completions.
             token_budget: Token budget manager that measures and bounds context.
             settings: Application configuration (model names, etc.).
         """
         self._vector_store = vector_store
         self._audit_repo = audit_repo
-        self._openai = openai_client
         self._token_budget = token_budget
         self._settings = settings
 
@@ -87,11 +85,8 @@ class RAGEngine:
         Returns:
             Dense float vector from the configured embedding model.
         """
-        response = await self._openai.embeddings.create(
-            model=self._settings.embedding_model,
-            input=query_text,
-        )
-        return response.data[0].embedding
+        embeddings = await embed_texts([query_text], self._settings)
+        return embeddings[0]
 
     async def _retrieve_and_filter(
         self,
@@ -237,10 +232,11 @@ class RAGEngine:
         contexts = [chunk.chunk.content for chunk in budgeted_chunks]
         messages = build_rag_prompt(query=query_text, retrieved_contexts=contexts)
 
-        completion = await self._openai.chat.completions.create(
+        completion = await litellm.acompletion(
             model=self._settings.openai_model,
-            messages=messages,  # type: ignore[arg-type]
+            messages=messages,
             temperature=0.0,
+            **provider_credentials(self._settings.openai_model, self._settings),
         )
 
         answer: str = completion.choices[0].message.content or FALLBACK_REFUSAL_MESSAGE
@@ -299,8 +295,8 @@ class RAGEngine:
         fallback refusal phrase is yielded as a single string and the generator
         terminates immediately — no LLM call is made.
 
-        Telemetry is not logged for streaming queries because the OpenAI
-        streaming API does not return a usage object in standard responses.
+        Telemetry is not logged for streaming queries because provider
+        streams do not return a usage object by default.
         Streaming usage accounting is deferred to a future sprint.
 
         Args:
@@ -329,14 +325,18 @@ class RAGEngine:
         contexts = [chunk.chunk.content for chunk in budgeted_chunks]
         messages = build_rag_prompt(query=query_text, retrieved_contexts=contexts)
 
-        stream = await self._openai.chat.completions.create(
+        stream = await litellm.acompletion(
             model=self._settings.openai_model,
-            messages=messages,  # type: ignore[arg-type]
+            messages=messages,
             temperature=0.0,
             stream=True,
+            **provider_credentials(self._settings.openai_model, self._settings),
         )
 
         async for chunk in stream:
+            # Providers may emit trailing chunks without choices (e.g. usage-only).
+            if not chunk.choices:
+                continue
             delta_content: str | None = chunk.choices[0].delta.content
             if delta_content:
                 yield delta_content

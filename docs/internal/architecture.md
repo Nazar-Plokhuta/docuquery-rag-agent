@@ -52,7 +52,7 @@ apps/api/src/
 
 - `settings.py` — `Settings` extends `pydantic_settings.BaseSettings`. All fields are typed; the model reads from a `.env` file and environment variables. The module exposes `get_settings() -> Settings`, an LRU-cached factory that is the single allowed entry point for runtime configuration across the entire service.
 - No layer other than `config` may call `os.environ` directly.
-- The `openai_base_url: str | None` field (mapped to `OPENAI_BASE_URL`) enables routing the `AsyncOpenAI` client through any OpenAI-compatible gateway — including OpenRouter (`https://openrouter.ai/api/v1`), vLLM, or LocalAI — without any code changes. When `None` (the default), the client targets the official OpenAI platform at `https://api.openai.com/v1`. The `base_url` kwarg is passed to `AsyncOpenAI` conditionally in `src/main.py` to avoid passing `None` explicitly to the SDK.
+- The `openai_base_url: str | None` field (mapped to `OPENAI_BASE_URL`) enables routing OpenAI-routed LiteLLM calls through any OpenAI-compatible gateway (vLLM, LocalAI; pair with an `openai/<model>` identifier) without code changes. When `None` (the default), requests target the official OpenAI platform. `src/core/llm.py::provider_credentials` forwards it as `api_base` only for OpenAI-routed models. Other providers (Anthropic, OpenRouter) are selected via the model identifier prefix and read their own API-key env vars.
 
 ### 2.2 `src/core/`
 
@@ -69,7 +69,7 @@ No I/O, no driver imports, no business logic belongs here.
 **Sole responsibility:** Transform raw document bytes into indexed, embedded `DocumentChunk` objects.
 
 - `chunker.py` — `TokenSlidingWindowChunker` encodes text with `tiktoken`, slides a bounded window over the token sequence, decodes each window to UTF-8, and extracts the nearest preceding Markdown heading for semantic attribution.
-- `pipeline.py` — `IngestionPipeline` orchestrates read → chunk → embed (OpenAI `text-embedding-3-small`) → index. It depends on `VectorStoreInterface` and `AsyncOpenAI`, never on ChromaDB directly.
+- `pipeline.py` — `IngestionPipeline` orchestrates read → chunk → embed (via `litellm.aembedding`, default `text-embedding-3-small`) → index. It depends on `VectorStoreInterface` and LiteLLM, never on ChromaDB directly.
 
 The ingestion layer never formats prompt templates or writes to audit storage.
 
@@ -94,7 +94,7 @@ Storage adapters must never format response payloads for API consumers or parse 
 - `schemas/` — Input DTOs (`QueryRequest`, `IngestResponse`) enforce `model_config = ConfigDict(extra="forbid")`. Output DTOs (`QueryResponse`, `AnalyticsResponse`) are frozen Pydantic models.
 - `dependencies.py` — FastAPI `Depends` factories that resolve long-lived service instances from `app.state` on each request without incurring per-request reconnection overhead.
 
-All endpoints use FastAPI `Depends` for service injection. Zero direct calls to ChromaDB, the audit database, or OpenAI are permitted inside routers.
+All endpoints use FastAPI `Depends` for service injection. Zero direct calls to ChromaDB, the audit database, or an LLM provider are permitted inside routers.
 
 ### 2.6 Composition root (`src/main.py`)
 
@@ -135,12 +135,12 @@ All endpoints are served under the `/api/v1` versioning prefix. OpenAPI document
 
 SSE event format:
 ```
-data: {"token": "<delta_text>"}\n\n   — one event per token from the OpenAI stream
+data: {"token": "<delta_text>"}\n\n   — one event per token from the LiteLLM stream
 data: [DONE]\n\n                       — explicit stream termination sentinel
 ```
 
 **Proxy bypass headers:** `Cache-Control: no-cache` and `X-Accel-Buffering: no` are set unconditionally to prevent nginx and CDN reverse proxies from buffering the event stream (see ADR-05).  
-**Telemetry:** Not logged for streaming queries; the OpenAI streaming API does not return a usage object in standard responses.
+**Telemetry:** Not logged for streaming queries; provider streams do not return a usage object in standard responses.
 
 ### 3.4 `POST /api/v1/ingest/file`
 
@@ -275,10 +275,10 @@ CREATE TABLE query_telemetry (
 | `query_text` | `TEXT` | `NOT NULL` | Raw user query; unbounded length |
 | `response_text` | `TEXT` | `NOT NULL` | Full LLM response; may be the anti-hallucination refusal phrase |
 | `latency_ms` | `DOUBLE PRECISION` | `NOT NULL` | 64-bit IEEE-754 float (SQLAlchemy `Float`); millisecond wall-clock precision |
-| `prompt_tokens` | `INTEGER` | `NOT NULL` | Prompt token count from the OpenAI usage object |
-| `completion_tokens` | `INTEGER` | `NOT NULL` | Completion token count from the OpenAI usage object |
+| `prompt_tokens` | `INTEGER` | `NOT NULL` | Prompt token count from the LiteLLM usage object |
+| `completion_tokens` | `INTEGER` | `NOT NULL` | Completion token count from the LiteLLM usage object |
 | `total_tokens` | `INTEGER` | `NOT NULL` | Sum of prompt and completion tokens |
-| `model_name` | `VARCHAR` | `NOT NULL` | OpenAI model identifier; enables per-model cost attribution |
+| `model_name` | `VARCHAR` | `NOT NULL` | LiteLLM model identifier; enables per-model cost attribution |
 | `created_at` | `VARCHAR` | `NOT NULL` | ISO-8601 UTC string (`YYYY-MM-DDTHH:MM:SSZ`), stored as text so it round-trips byte-for-byte on every backend; sorts lexicographically for `ORDER BY created_at DESC` |
 
 ### 5.3 Indexing Rationale
@@ -332,7 +332,7 @@ class VectorStoreInterface(ABC):
     ) -> Sequence[RetrievalResult]: ...
 ```
 
-**Design note — decoupled `embeddings` parameter:** Pre-computed embedding vectors are passed as a separate `list[list[float]]` parameter rather than being embedded inside `DocumentChunk`. This preserves the primitive-scalar-only constraint on `DocumentChunk.metadata` (required by ChromaDB's HNSW layer) and keeps embedding generation — an I/O-bound OpenAI call — in the ingestion layer where it belongs, not inside the storage adapter.
+**Design note — decoupled `embeddings` parameter:** Pre-computed embedding vectors are passed as a separate `list[list[float]]` parameter rather than being embedded inside `DocumentChunk`. This preserves the primitive-scalar-only constraint on `DocumentChunk.metadata` (required by ChromaDB's HNSW layer) and keeps embedding generation — an I/O-bound embedding call — in the ingestion layer where it belongs, not inside the storage adapter.
 
 ### 6.2 `AuditRepositoryInterface`
 
@@ -421,9 +421,9 @@ The SSE event format is the [WHATWG EventSource](https://html.spec.whatwg.org/mu
 
 ### ADR-06 — Single-Instance Lifespan Dependency Graph Shared Between Ingestion and Query Engines
 
-**Context:** Both `IngestionPipeline` and `RAGEngine` depend on the same `ChromaVectorStore`, `AsyncOpenAI` client, and `Settings` instance. A naïve FastAPI implementation might construct these dependencies fresh for every `Depends` resolution, resulting in multiple `chromadb.PersistentClient` handles open concurrently (which triggers file-locking conflicts) and multiple `AsyncOpenAI` instances that each maintain their own `httpx` connection pool (inflating file descriptor usage and TLS handshake overhead).
+**Context:** Both `IngestionPipeline` and `RAGEngine` depend on the same `ChromaVectorStore` and `Settings` instance. A naïve FastAPI implementation might construct these dependencies fresh for every `Depends` resolution, resulting in multiple `chromadb.PersistentClient` handles open concurrently (which triggers file-locking conflicts).
 
-**Decision:** All long-lived service instances — `SQLAlchemyAuditRepository`, `ChromaVectorStore`, `AsyncOpenAI`, `TokenBudgetManager`, `RAGEngine`, and `IngestionPipeline` — are constructed exactly once inside the `@asynccontextmanager lifespan()` function and attached to `app.state` before the application begins accepting requests:
+**Decision:** All long-lived service instances — `SQLAlchemyAuditRepository`, `ChromaVectorStore`, `TokenBudgetManager`, `RAGEngine`, and `IngestionPipeline` — are constructed exactly once inside the `@asynccontextmanager lifespan()` function and attached to `app.state` before the application begins accepting requests:
 
 ```python
 app.state.audit_repo = audit_repo
@@ -436,7 +436,7 @@ Thin `Depends` factory functions in `src/api/dependencies.py` resolve these from
 
 **Consequences:**
 - A single `chromadb.PersistentClient` holds the exclusive write lock on the HNSW index throughout the application's lifetime. Concurrent `add_documents` and `similarity_search` calls serialize through `asyncio.to_thread()`, which is safe because ChromaDB manages its own internal locking.
-- A single `AsyncOpenAI` instance shares one `httpx.AsyncClient` and its underlying connection pool across all concurrent requests, reducing TLS handshake overhead and file descriptor usage under load.
+- LiteLLM is process-global; `configure_litellm` applies its flags once at startup and no provider client needs to be shared.
 - `SQLAlchemyAuditRepository` shares one pooled `AsyncEngine` (see ADR-02); each operation checks a connection out of the pool in its own short-lived session, so concurrent requests do not contend on a single connection.
 - The ingestion and query paths share the same `ChromaVectorStore` instance, so documents indexed via `POST /api/v1/ingest/file` are immediately queryable via `POST /api/v1/query/` without any cache invalidation, replica lag, or consistency delay.
 - `TokenBudgetManager` loads the `cl100k_base` tiktoken BPE vocabulary once in its `__init__` and caches the `tiktoken.Encoding` object on the instance. Sharing this instance avoids repeated BPE vocabulary deserialisation across requests.
