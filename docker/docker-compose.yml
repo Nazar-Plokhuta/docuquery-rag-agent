@@ -98,7 +98,11 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Comma-separated origins allowed cross-origin access; empty disables CORS.
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY must be set in .env}
+      # Provider keys are optional: LiteLLM routes by model identifier, so only the
+      # key for the provider actually configured in *_MODEL needs a value.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
       LITELLM_DROP_PARAMS: ${LITELLM_DROP_PARAMS:-true}
@@ -128,13 +132,15 @@ services:
 
     # Migrations run on every start (idempotent) so the schema is current before
     # the first request; `exec` hands PID 1 to Uvicorn for clean signal handling.
+    # Settings expects an uppercase LOG_LEVEL while the Uvicorn CLI accepts only
+    # lowercase, so the value is lowercased here rather than changing either contract.
     command:
       - sh
       - -c
       - >-
         alembic upgrade head
         && exec uvicorn src.main:app --host 0.0.0.0 --port 8000
-        --log-level $${LOG_LEVEL:-info}
+        --log-level "$$(printf '%s' "$${LOG_LEVEL:-info}" | tr '[:upper:]' '[:lower:]')"
 
   web:
     build:

@@ -13,10 +13,11 @@ Isolation strategy
 ------------------
 Every ``Settings(...)`` construction in this module passes ``_env_file=None``
 so that the local ``.env`` file on the developer's machine (or CI environment)
-is never consulted.  Tests that assert a field is ``None`` additionally use
-``monkeypatch.delenv`` to remove any ambient process-level environment variable
-that may have been set before pytest launched.  This makes the entire suite
-reproducible regardless of the host machine's configuration.
+is never consulted.  That alone is not enough: importing ``litellm`` runs
+``load_dotenv`` and copies ``.env`` into ``os.environ`` for the whole pytest
+process.  The autouse ``_clean_settings_env`` fixture therefore removes the
+environment variable of every ``Settings`` field before each test, so defaults
+are asserted against a clean environment and tests opt in via ``monkeypatch.setenv``.
 """
 
 from __future__ import annotations
@@ -28,6 +29,14 @@ from src.config.settings import Settings
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clean_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip every ``Settings`` env var inherited from the host or a leaked ``.env``."""
+    for field_name in Settings.model_fields:
+        monkeypatch.delenv(field_name.upper(), raising=False)
+
 
 _REQUIRED_OVERRIDES: dict[str, str] = {
     "openai_api_key": "sk-test",

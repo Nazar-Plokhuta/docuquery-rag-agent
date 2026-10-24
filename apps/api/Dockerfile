@@ -46,20 +46,22 @@ RUN groupadd --gid 1001 appgroup \
 WORKDIR /app
 
 # Copy the resolved virtual environment from the builder stage.
-COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder --chown=appuser:appgroup /app/.venv /app/.venv
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
 
 # Copy application source and the Alembic environment so the image can run
 # `alembic upgrade head` against the configured DATABASE_URL.
-COPY src/ ./src/
-COPY alembic.ini ./
-COPY alembic/ ./alembic/
+COPY --chown=appuser:appgroup src/ ./src/
+COPY --chown=appuser:appgroup alembic.ini ./
+COPY --chown=appuser:appgroup alembic/ ./alembic/
 
 # Persistent data directory — mounted as a Docker volume in production so that
 # ChromaDB (and the optional SQLite audit file) survives container replacement.
-RUN mkdir -p /app/data && chown -R appuser:appgroup /app
+# Ownership of the code and venv is set via COPY --chown above; a recursive chown
+# over /app would rewrite every .venv inode into a new layer and take minutes.
+RUN mkdir -p /app/data && chown -R appuser:appgroup /app/data
 
 USER appuser
 
