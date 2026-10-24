@@ -14,6 +14,7 @@ Codebase Communication Standard: all source code, architectural documentation, i
 - No AI Fluff: do not write obvious comments (e.g. `# loop over items`). Document architectural intent ("why", not "what").
 
 # Architectural Boundaries (Clean Architecture)
+- Monorepo: the API service lives in `apps/api/`; every `src/...` and `tests/...` path below is relative to it.
 - Presentation Layer (`src/api`): Controllers, routers, request/response DTOs, SSE streaming. Zero direct DB/Chroma/OpenAI calls here.
 - Domain & Core Layer (`src/core`): Domain entities, interfaces/ABCs, business logic, RAG orchestration, and token bounding.
 - Ingestion Layer (`src/ingestion`): Text parsing, deterministic chunking, metadata enrichment.

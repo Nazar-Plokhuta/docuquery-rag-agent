@@ -2,6 +2,7 @@
 # DocuQuery RAG Agent — Dockerfile
 # Target: Production-grade, non-root, minimal attack surface
 # Base:   python:3.11-slim (Debian bookworm)
+# Build context: apps/api (see docker/docker-compose.yml)
 # ============================================================
 
 # --------------- Stage 1: dependency builder ---------------

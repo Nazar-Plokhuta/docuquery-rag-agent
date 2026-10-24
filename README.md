@@ -162,14 +162,14 @@ cd docuquery-rag-agent
 cp .env.example .env
 # Edit .env and set OPENAI_API_KEY=sk-...
 
-# 2. Build and start
-docker compose up --build
+# 2. Build and start (from the repository root)
+docker compose --env-file .env -f docker/docker-compose.yml up --build
 
 # 3. Verify health
 curl http://localhost:8000/api/v1/health/
 ```
 
-The `./data` directory on the host is bind-mounted into the container, so ChromaDB vector indices and SQLite telemetry persist across container restarts.
+The repository-level `data/` directory is bind-mounted into the container, so ChromaDB vector indices and SQLite telemetry persist across container restarts. `--env-file .env` is required because Compose only reads a `.env` located next to the compose file (`docker/`) for variable interpolation; the shared `.env` lives at the repository root.
 
 ### Option B: Local Development
 
@@ -181,15 +181,17 @@ python -m venv .venv
 source .venv/bin/activate        # Linux / macOS
 .venv\Scripts\Activate.ps1       # Windows PowerShell
 
-# 2. Install dependencies
-pip install -e ".[dev]"
+# 2. Install the API app (editable) with dev tooling
+pip install -e "apps/api[dev]"
 
-# 3. Configure environment
+# 3. Configure environment (one shared .env at the repository root)
 cp .env.example .env
 # Edit .env and set OPENAI_API_KEY=sk-...
 
-# 4. Start the server with hot-reload
-uvicorn src.main:app --reload --port 8000
+# 4. Start the server with hot-reload (from the repository root)
+uvicorn src.main:app --app-dir apps/api --reload --port 8000
+# ...or from inside the app directory:
+#   cd apps/api && uvicorn src.main:app --reload --port 8000
 
 # 5. Open the interactive API docs
 # Swagger UI  → http://localhost:8000/api/docs
@@ -439,13 +441,13 @@ curl -s -X POST http://localhost:8000/api/v1/query/ \
 
 ```bash
 # Run full automated test suite (160 tests)
-pytest -v
+pytest apps/api/tests -v
 
 # Run only unit tests
-pytest tests/unit/
+pytest apps/api/tests/unit/
 
 # Run only integration tests
-pytest tests/integration/
+pytest apps/api/tests/integration/
 
 # Run offline multi-format loader smoke verification
 python scripts/verify_all_loaders.py
@@ -460,17 +462,19 @@ All tests are fully isolated: no live OpenAI credentials, no running ChromaDB se
 
 ```bash
 # Check for lint violations
-ruff check src/ tests/
+ruff check apps/api/src/ apps/api/tests/
 
 # Auto-fix lint issues
-ruff check --fix src/ tests/
+ruff check --fix apps/api/src/ apps/api/tests/
 
 # Format code
-ruff format src/ tests/
+ruff format apps/api/src/ apps/api/tests/
 
 # Check formatting without modifying files
-ruff format --check src/ tests/
+ruff format --check apps/api/src/ apps/api/tests/
 ```
+
+All commands above also work from inside `apps/api/` with the `apps/api/` prefix dropped; Pytest and Ruff read their configuration from `apps/api/pyproject.toml`.
 
 ### End-to-End Smoke Test
 
@@ -492,6 +496,8 @@ The smoke test probes all six critical paths: health, document ingestion, ground
 
 All configuration is read from environment variables (or `.env` file) via Pydantic Settings. See `.env.example` for the full reference.
 
+The shared `.env` at the repository root is located by absolute path, so it is found regardless of the working directory; a `.env` in the working directory takes precedence. Relative persistence paths (the `./data/...` defaults below) resolve against the **process working directory**, so start the server from the repository root to share the top-level `data/` directory. Docker Compose sets absolute container paths and is unaffected.
+
 | Variable | Default | Description |
 |---|---|---|
 | `OPENAI_API_KEY` | *(required)* | OpenAI API key (or your gateway's key) |
@@ -512,33 +518,40 @@ All configuration is read from environment variables (or `.env` file) via Pydant
 
 ```
 docuquery-rag-agent/
-├── src/
-│   ├── config/          # Pydantic Settings — typed environment configuration
-│   ├── core/
-│   │   ├── models.py    # Domain models: DocumentChunk, RetrievalResult, Citation, RAGResult
-│   │   ├── interfaces.py# ABCs: VectorStoreInterface, AuditRepositoryInterface
-│   │   ├── exceptions.py# AppException hierarchy (ConfigurationError, StorageError, …)
-│   │   └── rag/
-│   │       ├── engine.py       # RAGEngine — full query and streaming pipeline
-│   │       ├── token_counter.py# TokenBudgetManager — greedy bin-packing
-│   │       └── prompts.py      # Anti-hallucination system prompt + citation format
-│   ├── ingestion/
-│   │   ├── loaders/     # BaseDocumentLoader, Factory, PDF, DOCX, CSV, Excel, HTML, Text
-│   │   ├── chunker.py   # TokenSlidingWindowChunker — cl100k_base BPE sliding window
-│   │   └── pipeline.py  # IngestionPipeline — load → chunk → embed → index
-│   ├── storage/
-│   │   ├── vector_store.py# ChromaVectorStore — asyncio.to_thread HNSW adapter
-│   │   └── audit_db.py  # SQLiteAuditRepository — aiosqlite persistent connection
-│   ├── api/
-│   │   ├── routes/      # health · query · ingestion · analytics routers
-│   │   ├── schemas/     # QueryRequest · QueryResponse · IngestResponse · AnalyticsResponse
-│   │   └── dependencies.py# Depends factories resolving services from app.state
-│   └── main.py          # FastAPI app · lifespan DI graph · exception handlers
-├── tests/
-│   ├── unit/            # Unit tests (loaders, chunker, RAG, settings — zero live APIs)
-│   └── integration/     # Integration tests (mocked engine/pipeline/repo)
+├── apps/
+│   ├── api/                 # FastAPI RAG service (also the Docker build context)
+│   │   ├── src/
+│   │   │   ├── config/          # Pydantic Settings — typed environment configuration
+│   │   │   ├── core/
+│   │   │   │   ├── models.py    # Domain models: DocumentChunk, RetrievalResult, Citation, RAGResult
+│   │   │   │   ├── interfaces.py# ABCs: VectorStoreInterface, AuditRepositoryInterface
+│   │   │   │   ├── exceptions.py# AppException hierarchy (ConfigurationError, StorageError, …)
+│   │   │   │   └── rag/
+│   │   │   │       ├── engine.py       # RAGEngine — full query and streaming pipeline
+│   │   │   │       ├── token_counter.py# TokenBudgetManager — greedy bin-packing
+│   │   │   │       └── prompts.py      # Anti-hallucination system prompt + citation format
+│   │   │   ├── ingestion/
+│   │   │   │   ├── loaders/     # BaseDocumentLoader, Factory, PDF, DOCX, CSV, Excel, HTML, Text
+│   │   │   │   ├── chunker.py   # TokenSlidingWindowChunker — cl100k_base BPE sliding window
+│   │   │   │   └── pipeline.py  # IngestionPipeline — load → chunk → embed → index
+│   │   │   ├── storage/
+│   │   │   │   ├── vector_store.py# ChromaVectorStore — asyncio.to_thread HNSW adapter
+│   │   │   │   └── audit_db.py  # SQLiteAuditRepository — aiosqlite persistent connection
+│   │   │   ├── api/
+│   │   │   │   ├── routes/      # health · query · ingestion · analytics routers
+│   │   │   │   ├── schemas/     # QueryRequest · QueryResponse · IngestResponse · AnalyticsResponse
+│   │   │   │   └── dependencies.py# Depends factories resolving services from app.state
+│   │   │   └── main.py          # FastAPI app · lifespan DI graph · exception handlers
+│   │   ├── tests/
+│   │   │   ├── unit/            # Unit tests (loaders, chunker, RAG, settings — zero live APIs)
+│   │   │   └── integration/     # Integration tests (mocked engine/pipeline/repo)
+│   │   ├── pyproject.toml   # Project metadata, dependencies, Ruff, and Pytest config
+│   │   └── Dockerfile       # Multi-stage production image (non-root, slim)
+│   └── web/                 # Next.js frontend (planned — v2.1.0)
+├── docker/
+│   └── docker-compose.yml   # Local development compose with bind-mounted data volume
 ├── data/
-│   └── sample_docs/     # Enterprise sample documents for testing and demos
+│   └── sample_docs/         # Enterprise sample documents for testing and demos
 ├── scripts/
 │   ├── smoke_test.py           # Async E2E smoke test script (httpx)
 │   ├── verify_all_loaders.py   # Offline loader verification suite
@@ -548,10 +561,7 @@ docuquery-rag-agent/
 │       ├── architecture.md  # Authoritative architecture reference + ADR log
 │       └── state.md         # Living implementation state + test inventory
 ├── demo.tape            # VHS tape automation for the documentation GIF
-├── Dockerfile           # Multi-stage production image (non-root, slim)
-├── docker-compose.yml   # Local development compose with bind-mounted data volume
-├── pyproject.toml       # Project metadata, dependencies, Ruff, and Pytest config
-└── .env.example         # Environment variable reference template
+└── .env.example         # Environment variable reference template (copy to shared root .env)
 ```
 
 ---

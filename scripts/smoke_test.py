@@ -47,7 +47,7 @@ _UNGROUNDED_QUERY: str = (
     "What is the quantum entanglement coefficient of the DocuQuery photon accelerator?"
 )
 
-# The deterministic fallback refusal phrase as defined in src/core/rag/prompts.py.
+# The deterministic fallback refusal phrase as defined in apps/api/src/core/rag/prompts.py.
 # Copied here to avoid importing application source code from the smoke script.
 _FALLBACK_REFUSAL_PREFIX: str = "I am sorry, but the provided documentation does not contain"
 

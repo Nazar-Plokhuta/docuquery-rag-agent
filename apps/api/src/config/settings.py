@@ -8,9 +8,17 @@ secrets isolated and enables dependency-injection-based overrides in tests.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The monorepo keeps one shared `.env` at the repository root, two levels above
+# `apps/api`, so every app reads the same file regardless of the process working
+# directory.  In the container image the app root is `/app`, where the extra
+# `.parent` hops saturate at `/` and the candidate simply does not exist.
+_API_ROOT: Path = Path(__file__).resolve().parents[2]
+_REPO_ENV_FILE: Path = _API_ROOT.parent.parent / ".env"
 
 
 class Settings(BaseSettings):
@@ -24,7 +32,8 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Later files win: a `.env` in the working directory overrides the shared one.
+        env_file=(_REPO_ENV_FILE, ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )

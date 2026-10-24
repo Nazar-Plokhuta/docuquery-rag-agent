@@ -1,17 +1,21 @@
 # ============================================================
 # DocuQuery RAG Agent — Docker Compose (local development)
 # ============================================================
-# Usage:
-#   docker compose up --build
+# Usage (from the repository root):
+#   docker compose --env-file .env -f docker/docker-compose.yml up --build
 #
-# The `./data` directory on the host is bind-mounted so that ChromaDB vectors
+# `--env-file` is required: Compose resolves `${VAR}` interpolation from a `.env`
+# next to the compose file (docker/), not from the shared one at the repo root.
+#
+# All relative paths below resolve against this file's directory (docker/).
+# The repository-level `data/` directory is bind-mounted so that ChromaDB vectors
 # and SQLite telemetry persist across container restarts without a named volume.
 # ============================================================
 
 services:
   api:
     build:
-      context: .
+      context: ../apps/api
       dockerfile: Dockerfile
       target: runtime
     container_name: docuquery-api
@@ -33,7 +37,7 @@ services:
 
     volumes:
       # Persistent data: ChromaDB index and SQLite telemetry survive restarts.
-      - ./data:/app/data
+      - ../data:/app/data
 
     healthcheck:
       test:

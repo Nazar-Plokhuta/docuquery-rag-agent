@@ -12,7 +12,8 @@ packages = ["src"]
 name = "docuquery-rag-agent"
 version = "1.2.0"
 description = "Enterprise-grade Retrieval-Augmented Generation microservice with document ingestion, vector search, and grounded LLM responses."
-readme = "README.md"
+# No `readme` field: the monorepo README lives at the repository root, outside
+# this package's build root, and hatchling aborts on a missing readme file.
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
@@ -79,6 +80,9 @@ indent-style = "space"
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Paths resolve against this file's directory (the rootdir), so `src` stays
+# importable when pytest is launched from the repository root as well.
+pythonpath = ["."]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]

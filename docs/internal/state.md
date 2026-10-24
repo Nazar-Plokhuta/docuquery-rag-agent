@@ -7,6 +7,8 @@
 
 > This document is a living record. Update it whenever a sprint closes or an ADR is ratified.
 
+> **Path convention:** the API service lives in `apps/api/`. Every `src/...` and `tests/...` path in this document is relative to that directory. `data/`, `scripts/`, and `docs/` remain at the repository root.
+
 ---
 
 ## Table of Contents

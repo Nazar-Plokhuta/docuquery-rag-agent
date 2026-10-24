@@ -30,6 +30,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+_API_ROOT = _REPO_ROOT / "apps" / "api"
 _SLA_PATH = _REPO_ROOT / "data" / "sample_docs" / "sla_policy.docx"
 _BASE_URL = "http://localhost:8000"
 _HEALTH_PATH = "/api/v1/health/"
@@ -114,6 +115,8 @@ def _spawn_server(workspace: tempfile.TemporaryDirectory[str]) -> subprocess.Pop
             "-m",
             "uvicorn",
             "src.main:app",
+            "--app-dir",
+            str(_API_ROOT),
             "--host",
             "127.0.0.1",
             "--port",

@@ -23,9 +23,9 @@ from openpyxl import Workbook
 from pypdf import PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, NumberObject, StreamObject
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+_API_ROOT = Path(__file__).resolve().parent.parent / "apps" / "api"
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
 
 from src.ingestion.loaders.base import LoadedDocument  # noqa: E402
 from src.ingestion.loaders.factory import DocumentLoaderFactory  # noqa: E402

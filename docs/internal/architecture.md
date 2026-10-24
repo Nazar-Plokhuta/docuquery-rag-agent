@@ -35,8 +35,10 @@ The service is designed for enterprise deployment. It prioritises:
 
 The `src/` tree is partitioned into five layers. Dependency arrows point strictly inward: `api` → `core`, `ingestion` → `core`, `storage` → `core`. No inner layer imports from an outer one.
 
+> **Path convention:** since the monorepo restructure, the API service lives in `apps/api/`. Every `src/...` and `tests/...` path in this document is relative to that directory (e.g. `src/main.py` is `apps/api/src/main.py`). Import paths (`from src.core...`) are unchanged.
+
 ```
-src/
+apps/api/src/
 ├── config/          # Environment-bound configuration
 ├── core/            # Domain models, interfaces, exceptions
 ├── ingestion/       # Text parsing, chunking, batch embedding

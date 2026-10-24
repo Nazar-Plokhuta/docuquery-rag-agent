@@ -15,9 +15,11 @@ venv/
 ENV/
 
 # Data, vector storage & persistent SQLite
-data/chroma_db/
-data/*.db
-data/*.sqlite3
+# `**/` keeps these ignored when the server is started from inside apps/api and
+# the relative `./data/...` defaults resolve there instead of the repo root.
+**/data/chroma_db/
+**/data/*.db
+**/data/*.sqlite3
 
 # IDE & OS specific
 .DS_Store

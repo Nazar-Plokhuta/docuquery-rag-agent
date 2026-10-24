@@ -8,6 +8,16 @@ Deliver production-ready, maintainable, strictly typed code adhering to high-rel
 
 ---
 
+## Monorepo Layout
+- `apps/api/` — the FastAPI service: `src/`, `tests/`, `pyproject.toml` (Ruff + Pytest config), `Dockerfile`. Also the Docker build context.
+- `apps/web/` — reserved for the Next.js frontend (v2.1.0); not yet present.
+- `docker/` — `docker-compose.yml` (build context `../apps/api`, bind-mounts the repo-level `data/`).
+- `data/sample_docs/`, `scripts/`, `docs/` — shared, repository-level assets. Scripts resolve `apps/api` and `data/` from their own location, so they run from any directory.
+- `.env` lives at the repository root and is shared across apps. `Settings` resolves it by absolute path; a `.env` in the working directory overrides it.
+- Every `src/...` and `tests/...` path in this guide is relative to `apps/api/`.
+
+---
+
 ## Clean Architecture Boundaries
 Dependencies point strictly inward: `api` → `core`, `ingestion` → `core`, `storage` → `core`.
 - **Presentation Layer (`src/api`):** Controllers, routers, request/response DTOs, SSE streaming. Zero direct DB/Chroma/OpenAI calls here.
@@ -39,20 +49,23 @@ Dependencies point strictly inward: `api` → `core`, `ingestion` → `core`, `s
 ---
 
 ## CLI & Verification Commands
-Always use these commands to verify changes before marking tasks complete:
-- **Run test suite:** `pytest -v`
-- **Run unit tests:** `pytest tests/unit/`
-- **Run integration tests:** `pytest tests/integration/`
-- **Linting check:** `ruff check src/ tests/`
-- **Auto-fix linting:** `ruff check --fix src/ tests/`
-- **Formatting check:** `ruff format --check src/ tests/`
-- **Apply formatting:** `ruff format src/ tests/`
-- **Start server locally:** `uvicorn src.main:app --reload --port 8000`
+Always use these commands to verify changes before marking tasks complete.
+Run them from the **repository root**; each also works from `apps/api/` with the `apps/api/` prefix dropped. Pytest and Ruff pick up `apps/api/pyproject.toml` automatically.
+- **One-time setup:** `pip install -e "apps/api[dev]"`
+- **Run test suite:** `pytest apps/api/tests -v`
+- **Run unit tests:** `pytest apps/api/tests/unit/`
+- **Run integration tests:** `pytest apps/api/tests/integration/`
+- **Linting check:** `ruff check apps/api/src/ apps/api/tests/`
+- **Auto-fix linting:** `ruff check --fix apps/api/src/ apps/api/tests/`
+- **Formatting check:** `ruff format --check apps/api/src/ apps/api/tests/`
+- **Apply formatting:** `ruff format apps/api/src/ apps/api/tests/`
+- **Start server locally:** `uvicorn src.main:app --app-dir apps/api --reload --port 8000` (from `apps/api/`: `uvicorn src.main:app --reload --port 8000`)
+- **Docker Compose:** `docker compose --env-file .env -f docker/docker-compose.yml up --build` (`--env-file` is required; Compose does not read the root `.env` for interpolation otherwise)
 
 ---
 
 ## Operational Workflow for Claude Code
-1. **Zero Regressions:** After any file modification, run `pytest` to guarantee all tests continue to pass (100% green suite).
+1. **Zero Regressions:** After any file modification, run `pytest apps/api/tests` to guarantee all tests continue to pass (100% green suite).
 2. **Offline Tests:** Do not introduce unmocked live network calls to OpenAI or external endpoints in tests.
 3. **Concise Execution:** Lead directly with concrete code changes, diffs, and command execution.
 
