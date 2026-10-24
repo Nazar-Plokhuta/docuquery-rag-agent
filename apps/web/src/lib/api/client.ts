@@ -5,6 +5,7 @@ export type HealthResponse = components["schemas"]["HealthResponse"];
 export type IngestResponse = components["schemas"]["IngestResponse"];
 export type QueryRequest = components["schemas"]["QueryRequest"];
 export type QueryResponse = components["schemas"]["QueryResponse"];
+export type Citation = components["schemas"]["Citation"];
 
 // Keys are checked against the generated OpenAPI `paths`, so a route renamed
 // in the backend fails the type check here. The literal trailing slashes are
@@ -19,6 +20,9 @@ export const API_ENDPOINTS = {
 } as const satisfies Record<string, keyof paths>;
 
 const HEALTH_TIMEOUT_MS = 5_000;
+
+export const NETWORK_ERROR_MESSAGE =
+  "Cannot reach the API. Check that the backend is running.";
 
 export class ApiError extends Error {
   readonly status: number | null;
@@ -41,9 +45,7 @@ async function request<T>(url: string, init: RequestInit): Promise<T> {
   } catch (error) {
     // Caller-initiated aborts are control flow, not failures to report.
     if (isAbortError(error)) throw error;
-    throw new ApiError(
-      "Cannot reach the API. Check that the backend is running.",
-    );
+    throw new ApiError(NETWORK_ERROR_MESSAGE);
   }
   if (!response.ok) {
     throw new ApiError(await normalizeApiError(response), response.status);
