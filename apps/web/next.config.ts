@@ -19,6 +19,12 @@ const nextConfig: NextConfig = {
   // stream into a single burst at the end. Compression belongs to the reverse
   // proxy in front of the app, not to the rewrite layer.
   compress: false,
+  experimental: {
+    // Rewrites buffer the request body and silently truncate it at 10MB, which
+    // would corrupt multipart uploads. Must exceed the 20MB per-file limit in
+    // src/lib/ingest.ts plus multipart framing overhead.
+    proxyClientMaxBodySize: "25mb",
+  },
   async rewrites() {
     const apiBase = process.env.API_INTERNAL_URL || "http://localhost:8000";
     return [

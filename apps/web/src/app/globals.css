@@ -84,3 +84,12 @@
     @apply bg-background text-foreground font-sans;
   }
 }
+
+@keyframes ingest-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}

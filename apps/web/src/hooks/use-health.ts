@@ -2,11 +2,7 @@
 
 import useSWR from "swr";
 
-import {
-  fetchHealth,
-  HEALTH_ENDPOINT,
-  type HealthResponse,
-} from "@/lib/api/health";
+import { API_ENDPOINTS, getHealth, type HealthResponse } from "@/lib/api/client";
 
 const POLL_INTERVAL_MS = 15_000;
 
@@ -17,8 +13,8 @@ export type HealthState =
 
 export function useHealth(): HealthState {
   const { data, error, isLoading } = useSWR<HealthResponse>(
-    HEALTH_ENDPOINT,
-    fetchHealth,
+    API_ENDPOINTS.health,
+    getHealth,
     {
       refreshInterval: POLL_INTERVAL_MS,
       // Keep the red state visible while the API is down instead of
