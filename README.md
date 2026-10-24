@@ -130,7 +130,7 @@ This citation format is enforced by prompt design. Every `Citation` object in th
 
 ### Full Async I/O
 
-Every network call, database operation, and filesystem interaction is `async`/`await`. The sole synchronous exception — ChromaDB's local driver — is explicitly offloaded via `asyncio.to_thread()`. The FastAPI event loop is never blocked.
+Every network call, database operation, and filesystem interaction is `async`/`await`. The sole synchronous exception — the ChromaDB client (local or HTTP) — is explicitly offloaded via `asyncio.to_thread()`. The FastAPI event loop is never blocked.
 
 ### Clean Architecture with Dependency Inversion
 
@@ -153,7 +153,7 @@ DocuQuery utilizes an extensible **Strategy + Factory** pattern (`DocumentLoader
 
 ## Quickstart
 
-### Option A: Docker Compose (Recommended for Production Preview)
+### Option A: Docker Compose (PostgreSQL + API, optional ChromaDB server)
 
 ```bash
 # 1. Clone and configure
@@ -163,13 +163,21 @@ cp .env.example .env
 # Edit .env and set OPENAI_API_KEY=sk-...
 
 # 2. Build and start (from the repository root)
-docker compose --env-file .env -f docker/docker-compose.yml up --build
+docker compose -f docker/docker-compose.yml --env-file .env up --build
 
 # 3. Verify health
 curl http://localhost:8000/api/v1/health/
 ```
 
-The repository-level `data/` directory is bind-mounted into the container, so ChromaDB vector indices and the file-backed SQLite telemetry database that Compose configures persist across container restarts. Set `DATABASE_URL` to a PostgreSQL URL for production. `--env-file .env` is required because Compose only reads a `.env` located next to the compose file (`docker/`) for variable interpolation; the shared `.env` lives at the repository root.
+Compose starts a `postgres:16-alpine` service (`db`, data in the named volume `pg_data`) and the `api` service, which waits for the database healthcheck, runs `alembic upgrade head`, and then launches Uvicorn. The `api` container always connects to `db` over the internal network: its `DATABASE_URL` is assembled from `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`, and the `DATABASE_URL` in `.env` (which targets `localhost` for local development) is ignored.
+
+By default ChromaDB runs embedded in the API process and persists to the repository-level `data/` directory, which is bind-mounted into the container. To run Chroma as a standalone server instead (named volume `chroma_data`), set `CHROMA_HOST=chroma` in `.env` and enable the `chroma` profile:
+
+```bash
+docker compose -f docker/docker-compose.yml --env-file .env --profile chroma up --build
+```
+
+`--env-file .env` is required because Compose only reads a `.env` located next to the compose file (`docker/`) for variable interpolation; the shared `.env` lives at the repository root.
 
 ### Option B: Local Development
 
@@ -510,7 +518,10 @@ The shared `.env` at the repository root is located by absolute path, so it is f
 | `APP_ENV` | `development` | Runtime environment (`development`, `staging`, `production`) |
 | `APP_PORT` | `8000` | Server port |
 | `LOG_LEVEL` | `INFO` | Root log level |
-| `CHROMA_PERSIST_DIRECTORY` | `./data/chroma_db` | ChromaDB persistence path |
+| `CHROMA_PERSIST_DIRECTORY` | `./data/chroma_db` | ChromaDB persistence path (local mode) |
+| `CHROMA_HOST` | *(unset — local mode)* | Hostname of a standalone Chroma server; when set, `CHROMA_PERSIST_DIRECTORY` is ignored |
+| `CHROMA_PORT` | `8000` | Port of the standalone Chroma server |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `docuquery` | Docker Compose only: credentials and database of the `db` service |
 | `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@localhost:5432/docuquery` | SQLAlchemy async URL of the audit database (`sqlite+aiosqlite:///...` for server-less runs) |
 
 > **Database schema:** The service creates the `query_telemetry` table on startup if it is missing. Use Alembic for reproducible schema changes, run from the repository root:
@@ -562,7 +573,7 @@ docuquery-rag-agent/
 │   │   └── Dockerfile       # Multi-stage production image (non-root, slim)
 │   └── web/                 # Next.js frontend (planned — v2.1.0)
 ├── docker/
-│   └── docker-compose.yml   # Local development compose with bind-mounted data volume
+│   └── docker-compose.yml   # PostgreSQL 16 + API (auto-migrate) + optional Chroma server
 ├── data/
 │   └── sample_docs/         # Enterprise sample documents for testing and demos
 ├── scripts/
@@ -591,6 +602,7 @@ The full ADR log is maintained in [`docs/internal/architecture.md`](docs/interna
 | ADR-04 | Heading-inclusive scan for Markdown section attribution |
 | ADR-05 | SSE streaming with `X-Accel-Buffering: no` proxy-bypass headers |
 | ADR-06 | Single-instance lifespan DI graph shared between ingestion and query engines |
+| ADR-07 | Multi-container Compose topology (PostgreSQL, optional Chroma server) with Alembic migrate-on-start |
 
 ---
 

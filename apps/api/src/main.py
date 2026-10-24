@@ -89,6 +89,9 @@ async def _provision_directories() -> None:
     makes the operation idempotent across hot-reloads and container restarts.
     """
     settings = get_settings()
+    if settings.chroma_host:
+        # Remote Chroma owns its own storage; no local directory is needed.
+        return
     directory = Path(settings.chroma_persist_directory)
     directory.mkdir(parents=True, exist_ok=True)
     logger.info("Provisioned directory: %s", directory.resolve())

@@ -4,8 +4,13 @@ All blocking Chroma calls are isolated inside ``asyncio.to_thread()`` to
 prevent the synchronous ChromaDB client from stalling the FastAPI event loop.
 
 Design decisions:
-- ``chromadb.PersistentClient`` is instantiated lazily on first access so the
-  constructor never performs I/O, keeping FastAPI startup fast.
+- The Chroma client is instantiated lazily on first access so the constructor
+  never performs I/O, keeping FastAPI startup fast.
+- Two deployment modes share one adapter: ``chromadb.PersistentClient`` against a
+  local directory (default, no server needed) and ``chromadb.HttpClient`` against
+  a standalone Chroma server when ``chroma_host`` is configured.  The sync HTTP
+  client is used instead of ``AsyncHttpClient`` so both modes go through the same
+  ``asyncio.to_thread()`` boundary and the collection handle type stays uniform.
 - The collection uses ``cosine`` distance (``hnsw:space = "cosine"``) which
   aligns with OpenAI embedding model output (unit-normalised vectors).
 - A single ``Collection`` handle is cached on the instance after first access.
@@ -21,6 +26,7 @@ from collections.abc import Sequence
 
 import chromadb
 from chromadb import Collection
+from chromadb.api import ClientAPI
 
 from src.config.settings import Settings
 from src.core.exceptions import StorageError
@@ -36,10 +42,11 @@ _COSINE_COLLECTION_METADATA: dict[str, str] = {"hnsw:space": "cosine"}
 
 
 class ChromaVectorStore(VectorStoreInterface):
-    """Persistent ChromaDB vector store adapter.
+    """ChromaDB vector store adapter (local persistent or remote HTTP server).
 
     Args:
-        settings: Application settings providing the ChromaDB persistence path.
+        settings: Application settings providing either the ChromaDB persistence
+            path or, when ``chroma_host`` is set, the remote server address.
         collection_name: Chroma collection to use (defaults to
             ``enterprise_knowledge_base``).
     """
@@ -50,14 +57,24 @@ class ChromaVectorStore(VectorStoreInterface):
         collection_name: str = _DEFAULT_COLLECTION_NAME,
     ) -> None:
         self._persist_dir: str = settings.chroma_persist_directory
+        # An empty string (e.g. an unset Compose `${CHROMA_HOST:-}`) means local mode.
+        self._host: str | None = settings.chroma_host or None
+        self._port: int = settings.chroma_port
         self._collection_name: str = collection_name
         # Lazily initialised; populated on first call to ``_get_collection()``.
-        self._client: chromadb.PersistentClient | None = None
+        self._client: ClientAPI | None = None
         self._collection: Collection | None = None
 
     # ------------------------------------------------------------------
     # Internal — lazy initialisation (all blocking, run in thread)
     # ------------------------------------------------------------------
+
+    def _build_client(self) -> ClientAPI:
+        """Build the Chroma client for the configured deployment mode."""
+        if self._host is not None:
+            logger.info("Using remote ChromaDB at %s:%d.", self._host, self._port)
+            return chromadb.HttpClient(host=self._host, port=self._port)
+        return chromadb.PersistentClient(path=self._persist_dir)
 
     def _init_collection_sync(self) -> Collection:
         """Create (or open) the Chroma client and collection synchronously.
@@ -66,7 +83,7 @@ class ChromaVectorStore(VectorStoreInterface):
         inside ``asyncio.to_thread()``.
         """
         if self._client is None:
-            self._client = chromadb.PersistentClient(path=self._persist_dir)
+            self._client = self._build_client()
         return self._client.get_or_create_collection(
             name=self._collection_name,
             metadata=_COSINE_COLLECTION_METADATA,

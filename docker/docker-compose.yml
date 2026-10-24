@@ -1,18 +1,74 @@
 # ============================================================
-# DocuQuery RAG Agent — Docker Compose (local development)
+# DocuQuery RAG Agent — Docker Compose
 # ============================================================
 # Usage (from the repository root):
-#   docker compose --env-file .env -f docker/docker-compose.yml up --build
+#   docker compose -f docker/docker-compose.yml --env-file .env up --build
+#
+# Optional standalone ChromaDB server (otherwise Chroma runs in-process and
+# persists to the bind-mounted data/ directory):
+#   CHROMA_HOST=chroma            # in .env
+#   docker compose -f docker/docker-compose.yml --env-file .env --profile chroma up --build
 #
 # `--env-file` is required: Compose resolves `${VAR}` interpolation from a `.env`
 # next to the compose file (docker/), not from the shared one at the repo root.
 #
 # All relative paths below resolve against this file's directory (docker/).
-# The repository-level `data/` directory is bind-mounted so that ChromaDB vectors
-# and SQLite telemetry persist across container restarts without a named volume.
+#
+# DATABASE_URL is assembled here from the POSTGRES_* variables and deliberately
+# ignores the DATABASE_URL in `.env`, which targets localhost for `uv run`
+# development and would be unreachable from inside the container network.
 # ============================================================
 
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: docuquery-db
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-docuquery}
+
+    ports:
+      # Host port is configurable so a locally installed PostgreSQL does not clash.
+      - "${POSTGRES_PORT:-5432}:5432"
+
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+    healthcheck:
+      # `$$` defers expansion to the container shell, where the POSTGRES_* vars exist.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 10
+
+  chroma:
+    # Opt-in via `--profile chroma`; pair with CHROMA_HOST=chroma in .env.
+    profiles: ["chroma"]
+    # Keep the server on the same major line as the chromadb client in uv.lock.
+    image: chromadb/chroma:${CHROMA_IMAGE_TAG:-1.5.9}
+    container_name: docuquery-chroma
+    restart: unless-stopped
+
+    environment:
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /data
+
+    volumes:
+      - chroma_data:/data
+
+    healthcheck:
+      # The image ships neither curl nor wget; a bare TCP connect is enough to
+      # confirm the listener is up.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8000'"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+
   api:
     build:
       context: ../apps/api
@@ -21,6 +77,14 @@ services:
     container_name: docuquery-api
     image: docuquery-rag-agent:dev
     restart: unless-stopped
+
+    depends_on:
+      db:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+        # Ignored when the `chroma` profile is not active.
+        required: false
 
     ports:
       - "${APP_PORT:-8000}:8000"
@@ -33,13 +97,15 @@ services:
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
       LITELLM_DROP_PARAMS: ${LITELLM_DROP_PARAMS:-true}
+      # Local mode persists under the bind mount; remote mode (CHROMA_HOST set)
+      # talks to the `chroma` service and ignores the directory.
       CHROMA_PERSIST_DIRECTORY: /app/data/chroma_db
-      # File-backed SQLite keeps local development free of a database server.
-      # Production points DATABASE_URL at PostgreSQL (postgresql+asyncpg://...).
-      DATABASE_URL: sqlite+aiosqlite:////app/data/telemetry.db
+      CHROMA_HOST: ${CHROMA_HOST:-}
+      CHROMA_PORT: ${CHROMA_PORT:-8000}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-docuquery}
 
     volumes:
-      # Persistent data: ChromaDB index and SQLite telemetry survive restarts.
+      # Uploaded/sample documents and, in local mode, the ChromaDB index.
       - ../data:/app/data
 
     healthcheck:
@@ -55,12 +121,16 @@ services:
       start_period: 15s
       retries: 3
 
-    # Uvicorn reload flag is only meaningful during local dev; set via env override
-    # rather than hard-coding into the Dockerfile CMD so the production image
-    # remains unchanged.
-    command: >
-      uvicorn src.main:app
-        --host 0.0.0.0
-        --port 8000
-        --reload
-        --log-level ${LOG_LEVEL:-info}
+    # Migrations run on every start (idempotent) so the schema is current before
+    # the first request; `exec` hands PID 1 to Uvicorn for clean signal handling.
+    command:
+      - sh
+      - -c
+      - >-
+        alembic upgrade head
+        && exec uvicorn src.main:app --host 0.0.0.0 --port 8000
+        --log-level $${LOG_LEVEL:-info}
+
+volumes:
+  pg_data:
+  chroma_data:

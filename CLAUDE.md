@@ -11,7 +11,7 @@ Deliver production-ready, maintainable, strictly typed code adhering to high-rel
 ## Monorepo Layout
 - `apps/api/` — the FastAPI service: `src/`, `tests/`, `pyproject.toml` (Ruff + Pytest config), `Dockerfile`. Also the Docker build context.
 - `apps/web/` — reserved for the Next.js frontend (v2.1.0); not yet present.
-- `docker/` — `docker-compose.yml` (build context `../apps/api`, bind-mounts the repo-level `data/`).
+- `docker/` — `docker-compose.yml`: `db` (PostgreSQL 16), `api` (build context `../apps/api`, runs `alembic upgrade head` before Uvicorn, bind-mounts the repo-level `data/`), and an optional standalone `chroma` service behind the `chroma` profile. Compose builds the api `DATABASE_URL` from `POSTGRES_*` and ignores the one in `.env`.
 - `data/sample_docs/`, `scripts/`, `docs/` — shared, repository-level assets. Scripts resolve `apps/api` and `data/` from their own location, so they run from any directory.
 - `.env` lives at the repository root and is shared across apps. `Settings` resolves it by absolute path; a `.env` in the working directory overrides it.
 - Every `src/...` and `tests/...` path in this guide is relative to `apps/api/`.
@@ -32,7 +32,7 @@ Dependencies point strictly inward: `api` → `core`, `ingestion` → `core`, `s
 ## Tech Stack Standards & Invariants
 - **Python:** 3.11+ / 3.12+.
 - **AsyncIO First:** All endpoints, DB operations, and network calls must be asynchronous (`async`/`await`). No blocking calls (`time.sleep`, synchronous `requests`) in hot paths.
-- **ChromaDB Threadpool Isolation:** All synchronous/blocking ChromaDB driver interactions must be offloaded via `asyncio.to_thread()` behind repository interfaces.
+- **ChromaDB Threadpool Isolation:** All synchronous/blocking ChromaDB driver interactions must be offloaded via `asyncio.to_thread()` behind repository interfaces. This covers both modes: local `PersistentClient` and the remote sync `HttpClient` (selected when `CHROMA_HOST` is set).
 - **Strict Typing:** Zero untyped function signatures. Enforce 100% type coverage. Use PEP 604 pipe syntax (`T | None`, `A | B`) instead of `Optional` or `Union`.
 - **Data Validation & DTOs:** Pydantic v2 and `pydantic-settings`. Enforce `model_config = ConfigDict(extra="forbid")` on input DTOs. Domain/output models should be immutable (`frozen=True`).
 - **Error Handling:** Map domain faults to typed subclasses of `AppException`. Centralized FastAPI exception handlers translate them to structured JSON envelopes. Never catch bare `Exception` without context; never write `pass` in exception blocks.
@@ -63,7 +63,7 @@ The toolchain is `uv`; `apps/api/uv.lock` is the single source of truth for depe
 - **Apply formatting:** `uv run --directory apps/api ruff format .`
 - **Start server locally:** `uv run --directory apps/api uvicorn src.main:app --reload --port 8000`
 - **Alembic migrations:** `uv run --directory apps/api alembic upgrade head` (drift check: `uv run --directory apps/api alembic check`)
-- **Docker Compose:** `docker compose --env-file .env -f docker/docker-compose.yml up --build` (`--env-file` is required; Compose does not read the root `.env` for interpolation otherwise)
+- **Docker Compose:** `docker compose -f docker/docker-compose.yml --env-file .env up --build` (`--env-file` is required; Compose does not read the root `.env` for interpolation otherwise). Add `--profile chroma` and set `CHROMA_HOST=chroma` to use the standalone Chroma server. Validate with `docker compose -f docker/docker-compose.yml --env-file .env config`.
 
 ---
 

@@ -25,7 +25,7 @@ DocuQuery RAG Agent is an asynchronous Retrieval-Augmented Generation (RAG) micr
 The service is designed for enterprise deployment. It prioritises:
 
 - **Strict grounding** — the LLM is forbidden from fabricating facts; every factual claim must cite a source chunk by filename and section header.
-- **Full async I/O** — every network call, database operation, and filesystem interaction is non-blocking. The sole exception is the ChromaDB local driver, which is explicitly offloaded to a thread pool via `asyncio.to_thread`.
+- **Full async I/O** — every network call, database operation, and filesystem interaction is non-blocking. The sole exception is the synchronous ChromaDB client (local or HTTP), which is explicitly offloaded to a thread pool via `asyncio.to_thread`.
 - **Token budget enforcement** — no unbounded context is injected into LLM prompts; `tiktoken` measures and bounds every payload before it leaves the ingestion or query layer.
 - **Clean separation of concerns** — presentation, domain, ingestion, storage, and configuration layers have explicit responsibility boundaries; cross-layer imports are directed inward only.
 
@@ -77,7 +77,7 @@ The ingestion layer never formats prompt templates or writes to audit storage.
 
 **Sole responsibility:** Provide concrete I/O adapters that implement the core interfaces.
 
-- `vector_store.py` — `ChromaVectorStore` implements `VectorStoreInterface` using `chromadb.PersistentClient`. All blocking Chroma calls are wrapped in `asyncio.to_thread()`.
+- `vector_store.py` — `ChromaVectorStore` implements `VectorStoreInterface` and builds its client lazily: `chromadb.PersistentClient` against `chroma_persist_directory` by default, or `chromadb.HttpClient(host, port)` when `chroma_host` is set. All blocking Chroma calls are wrapped in `asyncio.to_thread()`.
 - `orm_models.py` — SQLAlchemy declarative `Base` and the `query_telemetry` table mapping; `Base.metadata` is Alembic's autogenerate target.
 - `audit_db.py` — `SQLAlchemyAuditRepository` implements `AuditRepositoryInterface` over an `AsyncEngine`. Each operation uses a short-lived `AsyncSession`; the engine is created at application startup and disposed at shutdown.
 
@@ -359,7 +359,7 @@ Every function that performs I/O — filesystem reads, database operations, netw
 
 ### 7.2 Threadpool Offloading for ChromaDB
 
-The ChromaDB Python client (`chromadb.PersistentClient`) is synchronous. Every call that touches it — collection creation, `add`, `query` — must be dispatched via `asyncio.to_thread()`. Direct invocation on the event loop thread is a blocking-call violation. The `ChromaVectorStore` adapter encapsulates this pattern; callers never interact with the raw client.
+The ChromaDB Python clients (`chromadb.PersistentClient` and `chromadb.HttpClient`) are synchronous. Every call that touches it — collection creation, `add`, `query` — must be dispatched via `asyncio.to_thread()`. Direct invocation on the event loop thread is a blocking-call violation. The `ChromaVectorStore` adapter encapsulates this pattern; callers never interact with the raw client.
 
 ### 7.3 Token Bounding
 
@@ -395,6 +395,24 @@ API keys, database paths, and all environment-specific values must be read exclu
 ---
 
 ## 8. Architectural Decision Log — Sprints 3–5
+
+### ADR-07 — Multi-Container Compose Topology with Migrate-on-Start
+
+**Context:** The single-container preview used file-backed SQLite and embedded Chroma, which does not exercise the production PostgreSQL path and cannot scale the vector store independently of the API.
+
+**Decision:** `docker/docker-compose.yml` defines three services:
+
+- `db` — `postgres:16-alpine`, named volume `pg_data`, `pg_isready` healthcheck.
+- `api` — `depends_on: db (service_healthy)`; its command is `alembic upgrade head && exec uvicorn ...`, so the schema is current before the first request. Migrations are idempotent, so running them on every start is safe for a single replica. Its `DATABASE_URL` is assembled from `POSTGRES_*` and points at `db` on the internal network; the `DATABASE_URL` from the root `.env` (a `localhost` URL for `uv run`) is intentionally not forwarded.
+- `chroma` — optional standalone `chromadb/chroma` server (named volume `chroma_data`) behind the `chroma` Compose profile. `api` depends on it with `required: false`, so it is only awaited when the profile is active.
+
+`ChromaVectorStore` selects its client from settings: `chroma_host` unset → embedded `PersistentClient` (default, no server required); set → `HttpClient(chroma_host, chroma_port)`. The sync HTTP client is used rather than `AsyncHttpClient` so both modes share one `asyncio.to_thread()` boundary and one collection handle type (see §7.2). An empty `CHROMA_HOST` is treated as unset because Compose interpolates unset variables to an empty string.
+
+**Consequences:**
+
+- `uv run` development is unchanged: no new required settings, and `.env.example` keeps a local PostgreSQL or SQLite `DATABASE_URL`.
+- Tests patch both Chroma client constructors and use in-memory SQLite; no Chroma or PostgreSQL server is contacted.
+- Running several `api` replicas would race on `alembic upgrade head`; move migrations into a one-shot job before scaling out.
 
 ### ADR-05 — Server-Sent Events Streaming Protocol with Proxy-Buffering Bypass
 

@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     - **Application runtime**: env label, serving port, log verbosity.
     - **LLM (LiteLLM)**: OpenAI credentials, chat/embedding model identifiers, and
       LiteLLM behaviour flags.
-    - **Vector store**: ChromaDB persistence directory.
+    - **Vector store**: ChromaDB local persistence directory or remote server.
     - **Relational store**: SQLAlchemy async URL for the telemetry / audit trail.
     """
 
@@ -66,7 +66,12 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Vector store (ChromaDB)
     # ------------------------------------------------------------------
+    # Local file mode (default) writes to `chroma_persist_directory`. Setting
+    # `chroma_host` switches to a standalone Chroma server over HTTP and the
+    # persistence directory is then unused.
     chroma_persist_directory: str = "./data/chroma_db"
+    chroma_host: str | None = None
+    chroma_port: int = 8000
 
     # ------------------------------------------------------------------
     # Relational / audit store (SQLAlchemy async)

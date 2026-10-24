@@ -185,3 +185,26 @@ class TestSettingsFieldRegressions:
         s = _make_settings()
         assert hasattr(s, "openai_base_url")
         assert s.openai_base_url is None
+
+
+# ---------------------------------------------------------------------------
+# TestChromaRemoteSettings
+# ---------------------------------------------------------------------------
+
+
+class TestChromaRemoteSettings:
+    """Remote Chroma is opt-in: local file mode must remain the default."""
+
+    def test_defaults_to_local_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CHROMA_HOST", raising=False)
+        monkeypatch.delenv("CHROMA_PORT", raising=False)
+        settings = _make_settings()
+        assert settings.chroma_host is None
+        assert settings.chroma_port == 8000
+
+    def test_reads_host_and_port_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CHROMA_HOST", "chroma")
+        monkeypatch.setenv("CHROMA_PORT", "9000")
+        settings = _make_settings()
+        assert settings.chroma_host == "chroma"
+        assert settings.chroma_port == 9000
