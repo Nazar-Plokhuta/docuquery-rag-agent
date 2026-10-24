@@ -1,9 +1,9 @@
 # DocuQuery RAG Agent
 
-[![Release](https://img.shields.io/badge/RELEASE-V2.0.0-blue?style=for-the-badge&logo=github)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/releases/tag/v2.0.0)
+[![Release](https://img.shields.io/badge/RELEASE-V2.1.0-blue?style=for-the-badge&logo=github)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/releases/tag/v2.1.0)
 [![CI Pipeline](https://img.shields.io/badge/CI%20PIPELINE-PASSING-brightgreen?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/PYTHON-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/TESTS-189%20PASSING-44cc11?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent)
+[![Tests](https://img.shields.io/badge/TESTS-215%20PASSING-44cc11?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent)
 
 > **Enterprise-grade Retrieval-Augmented Generation microservice.** Strict grounding. Zero hallucinations. Full async. Production-ready from day one.
 
@@ -29,11 +29,24 @@ Standard off-the-shelf RAG pipelines fail in production for three predictable re
 
 ## Architecture
 
-DocuQuery is a Clean Architecture FastAPI microservice in a `uv`-managed monorepo (`apps/api/` for the service, `docker/` for the multi-container Compose stack) with five strictly bounded layers. Dependency arrows point strictly inward: the presentation layer (`api`) never touches the database; the storage layer never formats response payloads.
+DocuQuery is a Clean Architecture FastAPI microservice in a monorepo (`apps/api/` for the `uv`-managed service, `apps/web/` for the Next.js Studio UI, `docker/` for the multi-container Compose stack) with five strictly bounded backend layers. Dependency arrows point strictly inward: the presentation layer (`api`) never touches the database; the storage layer never formats response payloads.
+
+The full Compose stack is a single request path from the browser to the data services:
+
+```
+Browser ──▶ Web (Next.js 16 / Port 3000) ──▶ API (FastAPI / Port 8000) ──▶ PostgreSQL & Chroma
+              rewrites /api/v1/*              RAG · ingestion · audit        audit trail · vectors
+```
 
 ```mermaid
 flowchart TD
     Client(["🌐 Client / Browser"])
+
+    subgraph Web["Web  (apps/web · Next.js 16 · Port 3000)"]
+        direction TB
+        UI["DocuQuery Studio\n(Chat · Ingest · Telemetry)"]
+        PX["Rewrite proxy  /api/v1/*  →  API_INTERNAL_URL"]
+    end
 
     subgraph Presentation["Presentation Layer  (src/api)"]
         direction TB
@@ -79,7 +92,9 @@ flowchart TD
 
     Storage -->|"asyncpg"| PG
     Storage -->|"PersistentClient / HttpClient"| CH
-    Client -->|"HTTPS / SSE"| Presentation
+    Client -->|"HTTP"| Web
+    Web -->|"HTTP / SSE (api:8000)"| Presentation
+    Client -.->|"direct API access (curl, SDKs)"| Presentation
     Presentation -->|"RAGEngine"| Domain
     Presentation -->|"IngestionPipeline"| Ingestion
     Domain -->|"similarity_search"| Storage
@@ -161,7 +176,7 @@ DocuQuery utilizes an extensible **Strategy + Factory** pattern (`DocumentLoader
 
 ## Quickstart
 
-### Option A: Docker Compose (PostgreSQL + API, optional ChromaDB server)
+### Option A: Docker Compose (Web + API + PostgreSQL, optional ChromaDB server)
 
 ```bash
 # 1. Clone and configure
@@ -173,11 +188,15 @@ cp .env.example .env
 # 2. Build and start (from the repository root)
 docker compose -f docker/docker-compose.yml --env-file .env up --build
 
-# 3. Verify health
+# 3. Open DocuQuery Studio in the browser
+#    http://localhost:3000
+
+# 4. Verify health (directly against the API, or through the Studio proxy)
 curl http://localhost:8000/api/v1/health/
+curl http://localhost:3000/api/v1/health/
 ```
 
-Compose starts a `postgres:16-alpine` service (`db`, data in the named volume `pg_data`) and the `api` service, which waits for the database healthcheck, runs `alembic upgrade head`, and then launches Uvicorn. The `api` container always connects to `db` over the internal network: its `DATABASE_URL` is assembled from `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`, and the `DATABASE_URL` in `.env` (which targets `localhost` for local development) is ignored.
+Compose starts a `postgres:16-alpine` service (`db`, data in the named volume `pg_data`), the `api` service, which waits for the database healthcheck, runs `alembic upgrade head`, and then launches Uvicorn, and the `web` service (DocuQuery Studio, a Next.js standalone build on port 3000). `web` starts once `api` has started and reaches it at `http://api:8000` over the internal network; its healthcheck calls `/api/v1/health/` through the Next.js rewrite, so a green `web` container also proves the proxy path. The API origin is baked into the image at build time (Next.js freezes rewrite destinations during `next build`), so changing it requires rebuilding `web`. The host port is configurable with `WEB_PORT` (default `3000`). The `api` container always connects to `db` over the internal network: its `DATABASE_URL` is assembled from `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`, and the `DATABASE_URL` in `.env` (which targets `localhost` for local development) is ignored.
 
 By default ChromaDB runs embedded in the API process and persists to the repository-level `data/` directory, which is bind-mounted into the container. To run Chroma as a standalone server instead (named volume `chroma_data`), set `CHROMA_HOST=chroma` in `.env` and enable the `chroma` profile:
 
@@ -243,7 +262,7 @@ curl -s http://localhost:8000/api/v1/health/ | jq
 {
   "status": "ok",
   "app_name": "DocuQuery RAG Agent",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "environment": "development"
 }
 ```
@@ -458,7 +477,7 @@ curl -s -X POST http://localhost:8000/api/v1/query/ \
 ### Running the Test Suite
 
 ```bash
-# Run full automated test suite (189 tests)
+# Run full automated test suite (215 tests)
 uv run --directory apps/api pytest -v
 
 # Run only unit tests
@@ -525,6 +544,7 @@ The shared `.env` at the repository root is located by absolute path, so it is f
 | `LITELLM_DROP_PARAMS` | `true` | Drop request parameters unsupported by the target provider |
 | `APP_ENV` | `development` | Runtime environment (`development`, `staging`, `production`) |
 | `APP_PORT` | `8000` | Server port |
+| `WEB_PORT` | `3000` | Docker Compose only: host port the `web` (DocuQuery Studio) container is published on |
 | `LOG_LEVEL` | `INFO` | Root log level |
 | `CHROMA_PERSIST_DIRECTORY` | `./data/chroma_db` | ChromaDB persistence path (local mode) |
 | `CHROMA_HOST` | *(unset — local mode)* | Hostname of a standalone Chroma server; when set, `CHROMA_PERSIST_DIRECTORY` is ignored |
@@ -579,9 +599,10 @@ docuquery-rag-agent/
 │   │   ├── pyproject.toml   # Project metadata, dependencies, Ruff, and Pytest config
 │   │   ├── uv.lock          # Deterministic dependency lockfile (uv)
 │   │   └── Dockerfile       # Multi-stage production image (non-root, slim)
-│   └── web/                 # Next.js frontend (planned — v2.1.0)
+│   └── web/                 # DocuQuery Studio — Next.js 16 App Router, Tailwind v4, shadcn/ui
+│       └── Dockerfile       # Multi-stage standalone image (non-root `nextjs:nodejs`)
 ├── docker/
-│   └── docker-compose.yml   # PostgreSQL 16 + API (auto-migrate) + optional Chroma server
+│   └── docker-compose.yml   # PostgreSQL 16 + API (auto-migrate) + Web (Next.js) + optional Chroma server
 ├── data/
 │   └── sample_docs/         # Enterprise sample documents for testing and demos
 ├── scripts/
@@ -611,6 +632,7 @@ The full ADR log is maintained in [`docs/internal/architecture.md`](docs/interna
 | ADR-05 | SSE streaming with `X-Accel-Buffering: no` proxy-bypass headers |
 | ADR-06 | Single-instance lifespan DI graph shared between ingestion and query engines |
 | ADR-07 | Multi-container Compose topology (PostgreSQL, optional Chroma server) with Alembic migrate-on-start |
+| ADR-08 | Technical UI architecture & reverse-proxy topology (Next.js 16 standalone container, `/api/v1/*` rewrite to FastAPI) |
 
 ---
 

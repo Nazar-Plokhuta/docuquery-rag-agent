@@ -1,8 +1,8 @@
 # DocuQuery RAG Agent — Living Implementation State
 
-**Version:** 2.0.0  
-**Sprint:** 7 (complete)  
-**Test suite:** 189 tests — all passing  
+**Version:** 2.1.0  
+**Sprint:** 8 (complete)  
+**Test suite:** 215 tests — all passing  
 **Last updated:** 2026-10-24  
 
 > This document is a living record. Update it whenever a sprint closes or an ADR is ratified.
@@ -46,7 +46,8 @@
 | Split 2.5 | Toolchain standardized on `uv`: committed `apps/api/uv.lock`; dev tooling moved from the `[dev]` extra to a PEP 735 `dev` dependency group; CI uses `astral-sh/setup-uv` with `uv sync --frozen`; Dockerfile installs from the lockfile via `uv sync --frozen --no-dev`, which also fixes the missing parser dependencies (`python-docx`, `openpyxl`, `beautifulsoup4`, `pypdf`, `rich`, `python-multipart`) | Complete |
 | Split 3 | LiteLLM provider abstraction: `src/core/llm.py` (`configure_litellm`, `provider_credentials`, `embed_texts`); `litellm.acompletion` / `litellm.aembedding` replace the OpenAI SDK, so one model identifier selects OpenAI, Anthropic Claude, OpenRouter, Azure, or an OpenAI-compatible gateway; `OPENAI_API_KEY` / `OPENAI_BASE_URL` reach OpenAI-routed models only; autouse test guard fails un-mocked calls | Complete |
 | Split 4 | Multi-container Docker Compose (`docker/docker-compose.yml`): `postgres:16-alpine` (`db`), `api` running `alembic upgrade head` before Uvicorn, optional standalone Chroma server behind the `chroma` profile; `ChromaVectorStore` selects `PersistentClient` or `HttpClient` from `CHROMA_HOST` (ADR-07) | Complete |
-| Sprint 7 | **v2.0.0 Enterprise Core.** Monorepo migration (`apps/api/`, `docker/`; `apps/web/` reserved), PostgreSQL + Alembic audit store, LiteLLM integration, `uv` toolchain with committed `uv.lock`, multi-container Docker Compose. Split 5 closed the release: version metadata bumped to `2.0.0` (`pyproject.toml`, `uv.lock`, `main.py`, `health.py`), README and internal docs synchronised, scripts documented with `uv run --project apps/api`, 189-test suite verified | Complete |
+| Sprint 7 | **v2.0.0 Enterprise Core.** Monorepo migration (`apps/api/`, `docker/`; `apps/web/` reserved, delivered in Sprint 8), PostgreSQL + Alembic audit store, LiteLLM integration, `uv` toolchain with committed `uv.lock`, multi-container Docker Compose. Split 5 closed the release: version metadata bumped to `2.0.0` (`pyproject.toml`, `uv.lock`, `main.py`, `health.py`), README and internal docs synchronised, scripts documented with `uv run --project apps/api`, 189-test suite verified | Complete |
+| Sprint 8 | **v2.1.0 Technical UI & Web Workbench.** DocuQuery Studio (`apps/web/`): Next.js 16 App Router shell with shadcn/ui, typed OpenAPI client and error normalizer, document ingestion lab, Retrieval & Chat Studio with `ReadableStream` SSE streaming and citation badges, Telemetry & Observability Console with trace inspector. Split 5 containerized the UI: `output: "standalone"` build, three-stage `apps/web/Dockerfile` (non-root `nextjs:nodejs`), `web` service in Compose (port 3000, rewrite-proxied healthcheck, `API_INTERNAL_URL` as build arg), version metadata bumped to `2.1.0` (`apps/web/package.json`, `pyproject.toml`, `uv.lock`, `__init__.py`, `docs/openapi.json`), README and ADR-08 synchronised. 215-test backend suite plus web lint, `tsc --noEmit`, and production build verified (ADR-08) | Complete |
 
 ---
 
@@ -955,4 +956,10 @@ The SSE event format follows the [WHATWG EventSource](https://html.spec.whatwg.o
 
 ### ADR-07 — Multi-Container Compose Topology with Migrate-on-Start
 
-Ratified in Sprint 7. The full record (PostgreSQL `db`, `api` running `alembic upgrade head` before Uvicorn, optional `chroma` profile, `PersistentClient` / `HttpClient` selection) lives in [`architecture.md` §8](architecture.md#8-architectural-decision-log--sprints-37).
+Ratified in Sprint 7. The full record (PostgreSQL `db`, `api` running `alembic upgrade head` before Uvicorn, optional `chroma` profile, `PersistentClient` / `HttpClient` selection) lives in [`architecture.md` §8](architecture.md#8-architectural-decision-log--sprints-38).
+
+---
+
+### ADR-08 — Technical UI Architecture & Reverse Proxy Topology
+
+Ratified in Sprint 8. The full record (Next.js 16 App Router, shadcn/ui, `ReadableStream` SSE consumption, standalone Docker build, `/api/v1/*` rewrite proxying, build-time `API_INTERNAL_URL`) lives in [`architecture.md` §8](architecture.md#8-architectural-decision-log--sprints-38).

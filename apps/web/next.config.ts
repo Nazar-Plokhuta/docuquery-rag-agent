@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Emits a self-contained `.next/standalone/server.js` with only the traced
+  // runtime dependencies, which keeps the production container image small.
+  output: "standalone",
   cacheComponents: true,
   partialPrefetching: true,
   turbopack: {
@@ -25,6 +28,9 @@ const nextConfig: NextConfig = {
     // src/lib/ingest.ts plus multipart framing overhead.
     proxyClientMaxBodySize: "25mb",
   },
+  // Rewrite destinations are resolved once during `next build` and frozen into
+  // the routes manifest, so API_INTERNAL_URL must be present at build time
+  // (a Docker build arg); changing it on a running container has no effect.
   async rewrites() {
     const apiBase = process.env.API_INTERNAL_URL || "http://localhost:8000";
     return [

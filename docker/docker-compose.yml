@@ -9,6 +9,9 @@
 #   CHROMA_HOST=chroma            # in .env
 #   docker compose -f docker/docker-compose.yml --env-file .env --profile chroma up --build
 #
+# The Studio UI is then served at http://localhost:3000 and proxies /api/v1/*
+# to the `api` service over the internal network.
+#
 # `--env-file` is required: Compose resolves `${VAR}` interpolation from a `.env`
 # next to the compose file (docker/), not from the shared one at the repo root.
 #
@@ -132,6 +135,46 @@ services:
         alembic upgrade head
         && exec uvicorn src.main:app --host 0.0.0.0 --port 8000
         --log-level $${LOG_LEVEL:-info}
+
+  web:
+    build:
+      context: ../apps/web
+      dockerfile: Dockerfile
+      args:
+        # Next.js bakes rewrite destinations in at build time; the runtime
+        # variable below documents the value but cannot change it.
+        API_INTERNAL_URL: http://api:8000
+    container_name: docuquery-web
+    image: docuquery-web:dev
+    restart: unless-stopped
+
+    depends_on:
+      api:
+        condition: service_started
+
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+
+    environment:
+      API_INTERNAL_URL: http://api:8000
+
+    healthcheck:
+      # Probes through the Next.js rewrite, so a pass proves web -> api routing
+      # and not merely that the Node process is listening. 127.0.0.1 rather than
+      # localhost: Alpine resolves localhost to ::1, where Next is not bound.
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:3000/api/v1/health/",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
 
 volumes:
   pg_data:

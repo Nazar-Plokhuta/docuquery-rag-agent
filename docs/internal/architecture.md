@@ -1,7 +1,7 @@
 # DocuQuery RAG Agent — Architecture Reference
 
-**Version:** 2.0.0  
-**Status:** Authoritative — reflects implementation state as of Sprint 7 (v2.0.0 Enterprise Core)  
+**Version:** 2.1.0  
+**Status:** Authoritative — reflects implementation state as of Sprint 8 (v2.1.0 Technical UI & Web Workbench)  
 **Audience:** Internal engineering team  
 
 ---
@@ -15,7 +15,7 @@
 5. [Telemetry Schema](#5-telemetry-schema)
 6. [Core Interfaces](#6-core-interfaces)
 7. [Non-Negotiable Invariants](#7-non-negotiable-invariants)
-8. [Architectural Decision Log](#8-architectural-decision-log--sprints-37)
+8. [Architectural Decision Log](#8-architectural-decision-log--sprints-38)
 
 ---
 
@@ -116,7 +116,7 @@ All endpoints are served under the `/api/v1` versioning prefix. OpenAPI document
 
 **Purpose:** Liveness probe for load balancers, orchestrators, and monitoring systems.  
 **Auth:** None.  
-**Response:** `HealthResponse` — `status`, `app_name`, `version` (`2.0.0`), `environment`.  
+**Response:** `HealthResponse` — `status`, `app_name`, `version` (`2.1.0`), `environment`.  
 **Side effects:** None. Does not probe downstream dependencies (DB, vector store, LLM).
 
 ### 3.2 `POST /api/v1/query/`
@@ -241,7 +241,7 @@ Typed liveness probe payload, defined in `src/api/routes/health.py` rather than 
 |---|---|---|
 | `status` | `str` | Always `"ok"` while the process is alive |
 | `app_name` | `str` | Human-readable service name |
-| `version` | `str` | SemVer application version. Current release: `2.0.0` |
+| `version` | `str` | SemVer application version. Current release: `2.1.0` |
 | `environment` | `str` | Active `app_env` value from settings (`development`, `staging`, `production`) |
 
 ---
@@ -396,7 +396,29 @@ API keys, database paths, and all environment-specific values must be read exclu
 
 ---
 
-## 8. Architectural Decision Log — Sprints 3–7
+## 8. Architectural Decision Log — Sprints 3–8
+
+### ADR-08 — Technical UI Architecture & Reverse Proxy Topology
+
+**Context:** The API was usable only through `curl`, Swagger, and scripts. A technical audience needs a workbench to ingest documents, interrogate the corpus with live token streaming, and inspect the audit trail. Browsers calling FastAPI directly would require CORS, expose the API origin to the client, and force a second published origin per deployment.
+
+**Decision:** `apps/web/` hosts DocuQuery Studio, a standalone pnpm project (no root workspace) with this stack and topology:
+
+- **Framework:** Next.js 16 App Router with `cacheComponents` enabled, React 19, Tailwind v4, and shadcn/ui primitives (`src/components/ui/`). Pages are three routes: `/chat` (retrieval and streaming), `/ingest` (document ingestion lab), and `/telemetry` (live audit table and trace inspector). The API client is typed against `docs/openapi.json` through generated `openapi-typescript` definitions, and an error normalizer maps the structured `AppException` envelope to UI errors.
+- **Streaming:** the chat view consumes `POST /api/v1/query/stream` with `fetch` and a `ReadableStream` reader, parsing `data: <json>\n\n` frames until the `data: [DONE]` sentinel. `EventSource` is not used because it cannot issue POST requests with a JSON body.
+- **Reverse proxy via rewrites:** the browser only ever talks to the Next.js origin. `next.config.ts` rewrites `/api/v1/:path(.*)` to `API_INTERNAL_URL`, so the API needs no CORS configuration and is not required to be reachable from the client. Three settings are load-bearing: `skipTrailingSlashRedirect: true` and the `:path(.*)` pattern preserve FastAPI's trailing slashes (a plain `:path*` drops them and FastAPI then 307-redirects to `:8000`, bypassing the proxy); `compress: false` stops Next's gzip layer from buffering the proxied SSE stream into one burst; `proxyClientMaxBodySize: "25mb"` keeps multipart uploads from being truncated at the 10 MB default.
+- **Standalone container:** `output: "standalone"` makes `next build` emit a traced `server.js` with only the runtime dependencies. `apps/web/Dockerfile` is a three-stage build on `node:22-alpine` (`deps` → `builder` → `runner`); the runner copies `.next/standalone`, `.next/static`, and `public/`, runs as the non-root `nextjs:nodejs` user, and starts with `node server.js` on `0.0.0.0:3000`.
+- **Compose wiring:** the `web` service in `docker/docker-compose.yml` builds from `../apps/web`, publishes `3000` (`WEB_PORT`), and `depends_on: api (service_started)`. Its healthcheck requests `/api/v1/health/` through the rewrite, so it validates the proxy path to `api` and not only the Node process.
+
+**Consequences:**
+
+- Rewrite destinations are resolved during `next build` and frozen into the routes manifest, so `API_INTERNAL_URL` is a Docker **build argument** (`http://api:8000` in Compose). The runtime `environment` entry documents the value but cannot change it; pointing the image at another API requires a rebuild.
+- The healthcheck targets `127.0.0.1`, not `localhost`: Alpine resolves `localhost` to `::1` first, and the server binds IPv4 only (`HOSTNAME=0.0.0.0`), so BusyBox `wget` is refused.
+- `depends_on` uses `service_started`, not `service_healthy`: the UI is useful (and shows an API-down state) before the API finishes migrating, and the web healthcheck itself reports API reachability.
+- `apps/web/public/` is tracked through a `.gitkeep` so the runner stage's `COPY public` never fails on a fresh checkout.
+- Production deployments that need TLS or compression terminate it in a reverse proxy in front of Next.js; the app itself must not gzip proxied responses.
+
+---
 
 ### ADR-07 — Multi-Container Compose Topology with Migrate-on-Start
 

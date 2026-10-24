@@ -10,7 +10,7 @@ packages = ["src"]
 
 [project]
 name = "docuquery-rag-agent"
-version = "2.0.0"
+version = "2.1.0"
 description = "Enterprise-grade Retrieval-Augmented Generation microservice with document ingestion, vector search, and grounded LLM responses."
 # No `readme` field: the monorepo README lives at the repository root, outside
 # this package's build root, and hatchling aborts on a missing readme file.
