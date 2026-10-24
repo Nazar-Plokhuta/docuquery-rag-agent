@@ -6,6 +6,8 @@ export type IngestResponse = components["schemas"]["IngestResponse"];
 export type QueryRequest = components["schemas"]["QueryRequest"];
 export type QueryResponse = components["schemas"]["QueryResponse"];
 export type Citation = components["schemas"]["Citation"];
+export type AnalyticsResponse = components["schemas"]["AnalyticsResponse"];
+export type TelemetryRecord = components["schemas"]["TelemetryRecord"];
 
 // Keys are checked against the generated OpenAPI `paths`, so a route renamed
 // in the backend fails the type check here. The literal trailing slashes are
@@ -83,4 +85,15 @@ export function queryDocuments(
     body: JSON.stringify(payload),
     signal,
   });
+}
+
+export function getTelemetryLogs(
+  limit: number = 50,
+  signal?: AbortSignal,
+): Promise<AnalyticsResponse> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  return request<AnalyticsResponse>(
+    `${API_ENDPOINTS.analyticsRecent}?${query.toString()}`,
+    { signal },
+  );
 }
