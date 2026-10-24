@@ -50,22 +50,24 @@ Dependencies point strictly inward: `api` → `core`, `ingestion` → `core`, `s
 
 ## CLI & Verification Commands
 Always use these commands to verify changes before marking tasks complete.
-Run them from the **repository root**; each also works from `apps/api/` with the `apps/api/` prefix dropped. Pytest and Ruff pick up `apps/api/pyproject.toml` automatically.
-- **One-time setup:** `pip install -e "apps/api[dev]"`
-- **Run test suite:** `pytest apps/api/tests -v`
-- **Run unit tests:** `pytest apps/api/tests/unit/`
-- **Run integration tests:** `pytest apps/api/tests/integration/`
-- **Linting check:** `ruff check apps/api/src/ apps/api/tests/`
-- **Auto-fix linting:** `ruff check --fix apps/api/src/ apps/api/tests/`
-- **Formatting check:** `ruff format --check apps/api/src/ apps/api/tests/`
-- **Apply formatting:** `ruff format apps/api/src/ apps/api/tests/`
-- **Start server locally:** `uvicorn src.main:app --app-dir apps/api --reload --port 8000` (from `apps/api/`: `uvicorn src.main:app --reload --port 8000`)
+The toolchain is `uv`; `apps/api/uv.lock` is the single source of truth for dependencies. Run commands from the **repository root** with `--directory apps/api` (paths after it resolve against `apps/api/`), or drop that flag when already inside `apps/api/`. Pytest and Ruff pick up `apps/api/pyproject.toml` automatically.
+- **One-time setup / sync:** `uv sync --directory apps/api` (creates `apps/api/.venv`, installs runtime + `dev` group from the lockfile)
+- **Refresh lockfile after editing dependencies:** `uv lock --directory apps/api`
+- **Run test suite:** `uv run --directory apps/api pytest`
+- **Run unit tests:** `uv run --directory apps/api pytest tests/unit/`
+- **Run integration tests:** `uv run --directory apps/api pytest tests/integration/`
+- **Linting check:** `uv run --directory apps/api ruff check .`
+- **Auto-fix linting:** `uv run --directory apps/api ruff check --fix .`
+- **Formatting check:** `uv run --directory apps/api ruff format --check .`
+- **Apply formatting:** `uv run --directory apps/api ruff format .`
+- **Start server locally:** `uv run --directory apps/api uvicorn src.main:app --reload --port 8000`
+- **Alembic migrations:** `uv run --directory apps/api alembic upgrade head` (drift check: `uv run --directory apps/api alembic check`)
 - **Docker Compose:** `docker compose --env-file .env -f docker/docker-compose.yml up --build` (`--env-file` is required; Compose does not read the root `.env` for interpolation otherwise)
 
 ---
 
 ## Operational Workflow for Claude Code
-1. **Zero Regressions:** After any file modification, run `pytest apps/api/tests` to guarantee all tests continue to pass (100% green suite).
+1. **Zero Regressions:** After any file modification, run `uv run --directory apps/api pytest` to guarantee all tests continue to pass (100% green suite).
 2. **Offline Tests:** Do not introduce unmocked live network calls to OpenAI or external endpoints in tests.
 3. **Concise Execution:** Lead directly with concrete code changes, diffs, and command execution.
 

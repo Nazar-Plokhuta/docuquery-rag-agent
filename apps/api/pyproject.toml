@@ -39,7 +39,9 @@ dependencies = [
     "rich>=13.0.0",
 ]
 
-[project.optional-dependencies]
+# PEP 735 group rather than an extra: `uv sync` installs the `dev` group by
+# default and `--no-dev` excludes it, so production images never ship test tooling.
+[dependency-groups]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",

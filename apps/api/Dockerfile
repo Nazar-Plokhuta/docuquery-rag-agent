@@ -3,6 +3,7 @@
 # Target: Production-grade, non-root, minimal attack surface
 # Base:   python:3.11-slim (Debian bookworm)
 # Build context: apps/api (see docker/docker-compose.yml)
+# Dependencies: resolved from uv.lock via `uv sync --frozen --no-dev`
 # ============================================================
 
 # --------------- Stage 1: dependency builder ---------------
@@ -15,28 +16,25 @@ RUN apt-get update \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# UV_PYTHON_DOWNLOADS=never pins the venv to the image interpreter, which is
+# the same one the runtime stage ships, so the copied venv's symlinks resolve.
+# UV_LINK_MODE=copy keeps the venv self-contained instead of hard-linking
+# into a build cache that does not exist in the runtime stage.
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+
+# The venv is created at its final runtime path: console-script shebangs
+# embed absolute paths and break if the venv is relocated.
+WORKDIR /app
 
 # Copy dependency manifests first to maximise Docker layer cache hit rate.
-COPY pyproject.toml ./
-
-# Install project dependencies into an isolated prefix so the runtime stage
-# can copy a clean, reproducible set of wheels without build tooling.
-RUN pip install --upgrade pip \
-    && pip install --prefix=/install . --no-deps \
-    && pip install --prefix=/install \
-        "fastapi>=0.115.0" \
-        "uvicorn[standard]>=0.30.0" \
-        "pydantic>=2.8.0" \
-        "pydantic-settings>=2.4.0" \
-        "chromadb>=0.5.0" \
-        "openai>=1.40.0" \
-        "tiktoken>=0.7.0" \
-        "sqlalchemy[asyncio]>=2.0.0" \
-        "asyncpg>=0.29.0" \
-        "alembic>=1.13.0" \
-        "aiosqlite>=0.20.0" \
-        "httpx>=0.27.0"
+# The project itself is not installed (--no-install-project): the service runs
+# from the copied `src/` tree, and only third-party dependencies are needed.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
 # --------------- Stage 2: lean runtime image ---------------
 FROM python:3.11-slim AS runtime
@@ -45,10 +43,13 @@ FROM python:3.11-slim AS runtime
 RUN groupadd --gid 1001 appgroup \
     && useradd --uid 1001 --gid appgroup --shell /bin/bash --create-home appuser
 
-# Copy installed packages from the builder stage.
-COPY --from=builder /install /usr/local
-
 WORKDIR /app
+
+# Copy the resolved virtual environment from the builder stage.
+COPY --from=builder /app/.venv /app/.venv
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1
 
 # Copy application source and the Alembic environment so the image can run
 # `alembic upgrade head` against the configured DATABASE_URL.

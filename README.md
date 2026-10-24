@@ -173,16 +173,15 @@ The repository-level `data/` directory is bind-mounted into the container, so Ch
 
 ### Option B: Local Development
 
-**Prerequisites:** Python 3.11+
+**Prerequisites:** [`uv`](https://docs.astral.sh/uv/getting-started/installation/) (it provisions Python 3.11+ on demand)
 
 ```bash
-# 1. Create a virtual environment
-python -m venv .venv
-source .venv/bin/activate        # Linux / macOS
-.venv\Scripts\Activate.ps1       # Windows PowerShell
+# 1. Create the virtual environment and install pinned dependencies (incl. dev group)
+cd apps/api
+uv sync
 
-# 2. Install the API app (editable) with dev tooling
-pip install -e "apps/api[dev]"
+# 2. Everything below runs through `uv run`; no manual venv activation needed
+#    (from the repository root, add `--directory apps/api` after `uv run`)
 
 # 3. Configure environment (one shared .env at the repository root)
 cp .env.example .env
@@ -190,12 +189,13 @@ cp .env.example .env
 # DATABASE_URL defaults to PostgreSQL; for a server-less run use
 #   DATABASE_URL=sqlite+aiosqlite:///./data/telemetry.db
 
-# 4. Start the server with hot-reload (from the repository root)
-uvicorn src.main:app --app-dir apps/api --reload --port 8000
-# ...or from inside the app directory:
-#   cd apps/api && uvicorn src.main:app --reload --port 8000
+# 4. Start the server with hot-reload
+uv run uvicorn src.main:app --reload
 
-# 5. Open the interactive API docs
+# 5. Run the test suite
+uv run pytest
+
+# 6. Open the interactive API docs
 # Swagger UI  → http://localhost:8000/api/docs
 # ReDoc       → http://localhost:8000/api/redoc
 # Root path / → automatically redirects to /api/docs
@@ -206,7 +206,7 @@ uvicorn src.main:app --app-dir apps/api --reload --port 8000
 With the API listening on port 8000, run the human-paced pipeline walkthrough locally:
 
 ```bash
-python scripts/demo_runner.py
+uv run --project apps/api python scripts/demo_runner.py
 ```
 
 The script drives health, ingestion, a grounded query, refusal, and analytics through Rich console panels and HTTPX. The same flow is recorded by `demo.tape` into `docs/assets/demo.gif`.
@@ -443,19 +443,19 @@ curl -s -X POST http://localhost:8000/api/v1/query/ \
 
 ```bash
 # Run full automated test suite (169 tests)
-pytest apps/api/tests -v
+uv run --directory apps/api pytest -v
 
 # Run only unit tests
-pytest apps/api/tests/unit/
+uv run --directory apps/api pytest tests/unit/
 
 # Run only integration tests
-pytest apps/api/tests/integration/
+uv run --directory apps/api pytest tests/integration/
 
 # Run offline multi-format loader smoke verification
-python scripts/verify_all_loaders.py
+uv run --project apps/api python scripts/verify_all_loaders.py
 
 # Run the interactive terminal showcase (server must already be listening)
-python scripts/demo_runner.py
+uv run --project apps/api python scripts/demo_runner.py
 ```
 
 All tests are fully isolated: no live OpenAI credentials, no running ChromaDB server, and no network access are required. Mocks cover all external boundaries.
@@ -464,19 +464,19 @@ All tests are fully isolated: no live OpenAI credentials, no running ChromaDB se
 
 ```bash
 # Check for lint violations
-ruff check apps/api/src/ apps/api/tests/
+uv run --directory apps/api ruff check .
 
 # Auto-fix lint issues
-ruff check --fix apps/api/src/ apps/api/tests/
+uv run --directory apps/api ruff check --fix .
 
 # Format code
-ruff format apps/api/src/ apps/api/tests/
+uv run --directory apps/api ruff format .
 
 # Check formatting without modifying files
-ruff format --check apps/api/src/ apps/api/tests/
+uv run --directory apps/api ruff format --check .
 ```
 
-All commands above also work from inside `apps/api/` with the `apps/api/` prefix dropped; Pytest and Ruff read their configuration from `apps/api/pyproject.toml`.
+Inside `apps/api/`, drop `--directory apps/api`. Pytest and Ruff read their configuration from `apps/api/pyproject.toml`, and `apps/api/uv.lock` pins every dependency; run `uv lock` after editing `pyproject.toml`.
 
 ### End-to-End Smoke Test
 
@@ -515,8 +515,8 @@ The shared `.env` at the repository root is located by absolute path, so it is f
 > **Database schema:** The service creates the `query_telemetry` table on startup if it is missing. Use Alembic for reproducible schema changes, run from the repository root:
 >
 > ```bash
-> alembic -c apps/api/alembic.ini upgrade head   # apply migrations to DATABASE_URL
-> alembic -c apps/api/alembic.ini check          # fail when models and migrations drift
+> uv run --directory apps/api alembic upgrade head   # apply migrations to DATABASE_URL
+> uv run --directory apps/api alembic check          # fail when models and migrations drift
 > ```
 
 > **OpenRouter & Custom Gateways:** Set `OPENAI_BASE_URL=https://openrouter.ai/api/v1` and `OPENAI_API_KEY=<your-openrouter-key>` to route all LLM and embedding calls through OpenRouter or any other OpenAI-compatible provider (vLLM, LocalAI, Azure OpenAI). When unset, the service targets the official OpenAI platform. No code changes required.
@@ -557,6 +557,7 @@ docuquery-rag-agent/
 │   │   │   └── integration/     # Integration tests (mocked engine/pipeline/repo)
 │   │   ├── alembic/         # Alembic migration environment + versions (alembic.ini alongside)
 │   │   ├── pyproject.toml   # Project metadata, dependencies, Ruff, and Pytest config
+│   │   ├── uv.lock          # Deterministic dependency lockfile (uv)
 │   │   └── Dockerfile       # Multi-stage production image (non-root, slim)
 │   └── web/                 # Next.js frontend (planned — v2.1.0)
 ├── docker/

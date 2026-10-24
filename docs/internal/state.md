@@ -43,6 +43,7 @@
 | Sprint 5 | `docs/internal/architecture.md` update (endpoints, ADR-05, ADR-06), enterprise sample datasets (`data/sample_docs/`), E2E smoke test script (`scripts/smoke_test.py`), B2B showcase `README.md` | Complete |
 | Sprint 6 | Interactive terminal demo runner (`scripts/demo_runner.py`) using Rich console panels and `httpx`; VHS tape automation (`demo.tape`) producing a zero-artifact documentation GIF; multi-format enterprise sample documents (`data/sample_docs/sla_policy.docx`, `sla_matrix.csv`, `sla_matrix.xlsx`); standardized logging with `RichHandler` and LF normalization via `.gitattributes`. Release `v1.2.0` | Complete |
 | Split 2 | Audit store moved from raw `aiosqlite` to async SQLAlchemy 2.0: `SQLAlchemyAuditRepository` and `src/storage/orm_models.py`; PostgreSQL via `asyncpg` in production, in-memory SQLite in tests; Alembic environment with migration `0001`; `DATABASE_URL` replaces `SQLITE_DATABASE_PATH` | Complete |
+| Split 2.5 | Toolchain standardized on `uv`: committed `apps/api/uv.lock`; dev tooling moved from the `[dev]` extra to a PEP 735 `dev` dependency group; CI uses `astral-sh/setup-uv` with `uv sync --frozen`; Dockerfile installs from the lockfile via `uv sync --frozen --no-dev`, which also fixes the missing parser dependencies (`python-docx`, `openpyxl`, `beautifulsoup4`, `pypdf`, `rich`, `python-multipart`) | Complete |
 
 ---
 
@@ -133,8 +134,8 @@ app.state.audit_repo = audit_repo
 `apps/api/alembic/` holds the migration environment (`alembic.ini` sits beside it). `env.py` reads `get_settings().database_url`, so `DATABASE_URL` redirects both the service and the migrations, and targets `Base.metadata` with `compare_type=True`. Migration `0001_initial_query_telemetry` creates `query_telemetry`; it skips creation when the table already exists so a database bootstrapped by `initialize_db()` can be adopted. Run from the repository root:
 
 ```bash
-alembic -c apps/api/alembic.ini upgrade head
-alembic -c apps/api/alembic.ini check
+uv run --directory apps/api alembic upgrade head
+uv run --directory apps/api alembic check
 ```
 
 ---
@@ -485,7 +486,7 @@ All routers are registered under the same `/api/v1` versioning prefix.
 
 ## 3. Test Suite Inventory
 
-All 169 tests pass with `pytest --asyncio-mode=auto`. No test requires live OpenAI credentials or a running ChromaDB server.
+All 169 tests pass with `uv run --directory apps/api pytest` (`asyncio_mode = auto` is set in `pyproject.toml`). No test requires live OpenAI credentials or a running ChromaDB server.
 
 ### `tests/unit/test_health.py` — 4 tests
 

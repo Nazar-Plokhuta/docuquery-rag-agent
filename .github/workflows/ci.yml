@@ -19,26 +19,21 @@ jobs:
       - name: Check out repository code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: apps/api/pyproject.toml
+          enable-cache: true
+          cache-dependency-glob: apps/api/uv.lock
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+        run: uv sync --frozen
 
       - name: Run Ruff Linting
-        run: |
-          ruff check src/ tests/
+        run: uv run ruff check src/ tests/
 
       - name: Check Code Formatting
-        run: |
-          ruff format --check src/ tests/
+        run: uv run ruff format --check src/ tests/
 
       - name: Execute Pytest Suite
-        run: |
-          pytest -v
+        run: uv run pytest -v

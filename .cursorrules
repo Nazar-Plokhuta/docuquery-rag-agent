@@ -11,6 +11,7 @@ Codebase Communication Standard: all source code, architectural documentation, i
 - Data Validation: Pydantic v2 and Pydantic Settings (`pydantic-settings`). Enforce `model_config = ConfigDict(extra="forbid")` on input DTOs.
 - Primary Libraries: `fastapi`, `chromadb`, `openai` (v1.0+), `tiktoken`, `pydantic` v2, `pydantic-settings`, `sqlalchemy` (async), `asyncpg`, `alembic`, `aiosqlite` (tests), `pytest`, `pytest-asyncio`.
 - Code Quality: PEP 8, Ruff formatting/linting, Google Python Style Guide for docstrings.
+- Toolchain: `uv` manages the virtual environment and dependencies; `apps/api/uv.lock` is committed and authoritative. Never use bare `pip`/`python -m venv`; run every tool through `uv run`.
 - No AI Fluff: do not write obvious comments (e.g. `# loop over items`). Document architectural intent ("why", not "what").
 
 # Architectural Boundaries (Clean Architecture)
@@ -34,3 +35,12 @@ Codebase Communication Standard: all source code, architectural documentation, i
 - Domain Exceptions: map internal errors to custom domain exceptions derived from a base `AppException`.
 - HTTP Mapping: translate domain exceptions to explicit HTTP status codes via centralized FastAPI exception handlers.
 - Secrets Isolation: zero hardcoded API keys or paths. Read strictly from environment variables via Pydantic Settings (`.env`).
+
+# CLI & Verification Commands
+Run from the repository root; `--directory apps/api` makes paths relative to `apps/api/`. Verify changes with these before considering a task complete.
+- Sync environment: `uv sync --directory apps/api`
+- Tests: `uv run --directory apps/api pytest`
+- Lint: `uv run --directory apps/api ruff check .`
+- Format check: `uv run --directory apps/api ruff format --check .`
+- Local server: `uv run --directory apps/api uvicorn src.main:app --reload --port 8000`
+- Alembic migrations: `uv run --directory apps/api alembic upgrade head`
