@@ -7,7 +7,7 @@ recording does not depend on, or mutate, a developer's existing index
 (re-ingesting ``sla_policy`` would collide with chunk ids already stored).
 
 Usage:
-    python scripts/demo_runner.py
+    uv run --project apps/api python scripts/demo_runner.py
 """
 
 from __future__ import annotations

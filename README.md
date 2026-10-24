@@ -1,9 +1,9 @@
 # DocuQuery RAG Agent
 
-[![Release](https://img.shields.io/badge/RELEASE-V1.2.0-blue?style=for-the-badge&logo=github)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/releases/tag/v1.2.0)
+[![Release](https://img.shields.io/badge/RELEASE-V2.0.0-blue?style=for-the-badge&logo=github)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/releases/tag/v2.0.0)
 [![CI Pipeline](https://img.shields.io/badge/CI%20PIPELINE-PASSING-brightgreen?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/PYTHON-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/TESTS-183%20PASSING-44cc11?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent)
+[![Tests](https://img.shields.io/badge/TESTS-189%20PASSING-44cc11?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Nazar-Plokhuta/docuquery-rag-agent)
 
 > **Enterprise-grade Retrieval-Augmented Generation microservice.** Strict grounding. Zero hallucinations. Full async. Production-ready from day one.
 
@@ -29,7 +29,7 @@ Standard off-the-shelf RAG pipelines fail in production for three predictable re
 
 ## Architecture
 
-DocuQuery is a Clean Architecture FastAPI microservice with five strictly bounded layers. Dependency arrows point strictly inward: the presentation layer (`api`) never touches the database; the storage layer never formats response payloads.
+DocuQuery is a Clean Architecture FastAPI microservice in a `uv`-managed monorepo (`apps/api/` for the service, `docker/` for the multi-container Compose stack) with five strictly bounded layers. Dependency arrows point strictly inward: the presentation layer (`api`) never touches the database; the storage layer never formats response payloads.
 
 ```mermaid
 flowchart TD
@@ -62,23 +62,31 @@ flowchart TD
     subgraph Storage["Storage Layer  (src/storage)"]
         direction TB
         VEC["ChromaVectorStore\n(asyncio.to_thread · HNSW cosine)"]
-        ADB["SQLAlchemyAuditRepository\n(async SQLAlchemy · asyncpg)"]
+        ADB["SQLAlchemyAuditRepository\n(SQLAlchemy 2.0 async · asyncpg · Alembic)"]
+    end
+
+    subgraph Data["Data Services  (docker/docker-compose.yml)"]
+        direction TB
+        PG[("PostgreSQL 16\nquery_telemetry")]
+        CH[("ChromaDB\nembedded or standalone server")]
     end
 
     subgraph Gateways["External Gateways"]
         direction TB
-        OAI["OpenAI · Anthropic · OpenRouter · ...\nrouted by LiteLLM"]
-        ORT["vLLM / LocalAI\n(OpenAI-compatible via OPENAI_BASE_URL)"]
+        OAI["OpenAI · Anthropic Claude · OpenRouter · ...\nrouted by LiteLLM"]
+        ORT["Custom gateways: vLLM / LocalAI\n(OpenAI-compatible via OPENAI_BASE_URL)"]
     end
 
+    Storage -->|"asyncpg"| PG
+    Storage -->|"PersistentClient / HttpClient"| CH
     Client -->|"HTTPS / SSE"| Presentation
     Presentation -->|"RAGEngine"| Domain
     Presentation -->|"IngestionPipeline"| Ingestion
     Domain -->|"similarity_search"| Storage
     Domain -->|"TelemetryRecord"| Storage
     Ingestion -->|"add_documents"| Storage
-    Domain -->|"chat.completions"| Gateways
-    Ingestion -->|"embeddings.create"| Gateways
+    Domain -->|"litellm.acompletion"| Gateways
+    Ingestion -->|"litellm.aembedding"| Gateways
 ```
 
 **Query flow (non-streaming):**
@@ -235,7 +243,7 @@ curl -s http://localhost:8000/api/v1/health/ | jq
 {
   "status": "ok",
   "app_name": "DocuQuery RAG Agent",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "environment": "development"
 }
 ```
@@ -450,7 +458,7 @@ curl -s -X POST http://localhost:8000/api/v1/query/ \
 ### Running the Test Suite
 
 ```bash
-# Run full automated test suite (183 tests)
+# Run full automated test suite (189 tests)
 uv run --directory apps/api pytest -v
 
 # Run only unit tests
@@ -492,10 +500,10 @@ After starting the server, run the automated smoke test to verify the full pipel
 
 ```bash
 # Against the local dev server
-python scripts/smoke_test.py
+uv run --project apps/api python scripts/smoke_test.py
 
 # Against a custom URL (e.g. Docker Compose)
-python scripts/smoke_test.py --base-url http://localhost:8000
+uv run --project apps/api python scripts/smoke_test.py --base-url http://localhost:8000
 ```
 
 The smoke test probes all six critical paths: health, document ingestion, grounded query with citations, out-of-scope refusal, SSE streaming, and analytics telemetry.

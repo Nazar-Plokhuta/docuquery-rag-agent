@@ -1,7 +1,7 @@
 # DocuQuery RAG Agent — Architecture Reference
 
-**Version:** 1.2.0  
-**Status:** Authoritative — reflects implementation state as of Sprint 6 (v1.2.0)  
+**Version:** 2.0.0  
+**Status:** Authoritative — reflects implementation state as of Sprint 7 (v2.0.0 Enterprise Core)  
 **Audience:** Internal engineering team  
 
 ---
@@ -15,6 +15,7 @@
 5. [Telemetry Schema](#5-telemetry-schema)
 6. [Core Interfaces](#6-core-interfaces)
 7. [Non-Negotiable Invariants](#7-non-negotiable-invariants)
+8. [Architectural Decision Log](#8-architectural-decision-log--sprints-37)
 
 ---
 
@@ -56,10 +57,11 @@ apps/api/src/
 
 ### 2.2 `src/core/`
 
-**Sole responsibility:** Own the domain language — immutable data models, abstract storage contracts, and the exception hierarchy.
+**Sole responsibility:** Own the domain language — immutable data models, abstract storage contracts, the LiteLLM provider gateway, and the exception hierarchy.
 
 - `models.py` — Frozen Pydantic v2 models (`DocumentChunk`, `RetrievalResult`, `TelemetryRecord`). These are the canonical data contracts shared across all layers.
 - `interfaces.py` — Abstract base classes (`VectorStoreInterface`, `AuditRepositoryInterface`). All storage consumers depend on these ABCs, never on concrete implementations.
+- `llm.py` — LiteLLM gateway helpers: `configure_litellm` (global flags, applied once in the lifespan), `provider_credentials` (per-model credential routing), and `embed_texts` (`litellm.aembedding`). `RAGEngine` calls `litellm.acompletion` with the same credentials. Every completion and embedding goes through LiteLLM; no provider SDK (`openai`, `anthropic`) is imported anywhere. The model identifier alone selects the provider (OpenAI, Anthropic Claude, OpenRouter, Azure, or an OpenAI-compatible gateway such as vLLM), and `OPENAI_API_KEY` / `OPENAI_BASE_URL` are forwarded to OpenAI-routed models only.
 - `exceptions.py` — `AppException` base and its concrete subclasses (`ConfigurationError`, `ResourceNotFoundError`, `StorageError`). All domain faults are expressed as typed subclasses of `AppException`.
 
 No I/O, no driver imports, no business logic belongs here.
@@ -114,7 +116,7 @@ All endpoints are served under the `/api/v1` versioning prefix. OpenAPI document
 
 **Purpose:** Liveness probe for load balancers, orchestrators, and monitoring systems.  
 **Auth:** None.  
-**Response:** `HealthResponse` — `status`, `app_name`, `version` (`1.2.0`), `environment`.  
+**Response:** `HealthResponse` — `status`, `app_name`, `version` (`2.0.0`), `environment`.  
 **Side effects:** None. Does not probe downstream dependencies (DB, vector store, LLM).
 
 ### 3.2 `POST /api/v1/query/`
@@ -165,7 +167,7 @@ data: [DONE]\n\n                       — explicit stream termination sentinel
 
 All domain models live in `src/core/models.py`. Additional domain models introduced in Sprint 3 and 4 (`Citation`, `RAGResult`) are listed below. Every model carries `model_config = ConfigDict(frozen=True)`, making instances immutable and hashable across async call boundaries.
 
-### 3.1 `DocumentChunk`
+### 4.1 `DocumentChunk`
 
 Represents a single bounded text segment extracted from a source document.
 
@@ -179,7 +181,7 @@ Represents a single bounded text segment extracted from a source document.
 
 The `metadata` type is intentionally restricted to `dict[str, str | int]` — ChromaDB's HNSW index accepts only scalar metadata values, and this constraint propagates from the storage boundary up to the model definition.
 
-### 3.2 `RetrievalResult`
+### 4.2 `RetrievalResult`
 
 A scored chunk returned from a vector similarity search.
 
@@ -190,7 +192,7 @@ A scored chunk returned from a vector similarity search.
 
 The score is computed as `score = max(0.0, 1.0 - cosine_distance)`, where `cosine_distance ∈ [0, 1]` for unit-normalised OpenAI embeddings. The clamp guards against floating-point arithmetic producing values below zero.
 
-### 3.3 `TelemetryRecord`
+### 4.3 `TelemetryRecord`
 
 An immutable audit log entry capturing the full lifecycle of one RAG query.
 
@@ -239,7 +241,7 @@ Typed liveness probe payload, defined in `src/api/routes/health.py` rather than 
 |---|---|---|
 | `status` | `str` | Always `"ok"` while the process is alive |
 | `app_name` | `str` | Human-readable service name |
-| `version` | `str` | SemVer application version. Current release: `1.2.0` |
+| `version` | `str` | SemVer application version. Current release: `2.0.0` |
 | `environment` | `str` | Active `app_env` value from settings (`development`, `staging`, `production`) |
 
 ---
@@ -394,7 +396,7 @@ API keys, database paths, and all environment-specific values must be read exclu
 
 ---
 
-## 8. Architectural Decision Log — Sprints 3–5
+## 8. Architectural Decision Log — Sprints 3–7
 
 ### ADR-07 — Multi-Container Compose Topology with Migrate-on-Start
 

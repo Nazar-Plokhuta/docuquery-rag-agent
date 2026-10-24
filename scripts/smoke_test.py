@@ -1,7 +1,7 @@
 """End-to-end smoke test script for the DocuQuery RAG Agent.
 
 Usage:
-    python scripts/smoke_test.py [--base-url http://localhost:8000]
+    uv run --project apps/api python scripts/smoke_test.py [--base-url http://localhost:8000]
 
 Runs an automated sanity check against a running server instance:
     1. Liveness probe  — GET  /api/v1/health/

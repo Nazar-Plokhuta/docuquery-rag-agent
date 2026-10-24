@@ -1,9 +1,9 @@
 # DocuQuery RAG Agent — Living Implementation State
 
-**Version:** 1.2.0  
-**Sprint:** 6 (complete)  
-**Test suite:** 183 tests — all passing  
-**Last updated:** 2026-09-30  
+**Version:** 2.0.0  
+**Sprint:** 7 (complete)  
+**Test suite:** 189 tests — all passing  
+**Last updated:** 2026-10-24  
 
 > This document is a living record. Update it whenever a sprint closes or an ADR is ratified.
 
@@ -44,6 +44,9 @@
 | Sprint 6 | Interactive terminal demo runner (`scripts/demo_runner.py`) using Rich console panels and `httpx`; VHS tape automation (`demo.tape`) producing a zero-artifact documentation GIF; multi-format enterprise sample documents (`data/sample_docs/sla_policy.docx`, `sla_matrix.csv`, `sla_matrix.xlsx`); standardized logging with `RichHandler` and LF normalization via `.gitattributes`. Release `v1.2.0` | Complete |
 | Split 2 | Audit store moved from raw `aiosqlite` to async SQLAlchemy 2.0: `SQLAlchemyAuditRepository` and `src/storage/orm_models.py`; PostgreSQL via `asyncpg` in production, in-memory SQLite in tests; Alembic environment with migration `0001`; `DATABASE_URL` replaces `SQLITE_DATABASE_PATH` | Complete |
 | Split 2.5 | Toolchain standardized on `uv`: committed `apps/api/uv.lock`; dev tooling moved from the `[dev]` extra to a PEP 735 `dev` dependency group; CI uses `astral-sh/setup-uv` with `uv sync --frozen`; Dockerfile installs from the lockfile via `uv sync --frozen --no-dev`, which also fixes the missing parser dependencies (`python-docx`, `openpyxl`, `beautifulsoup4`, `pypdf`, `rich`, `python-multipart`) | Complete |
+| Split 3 | LiteLLM provider abstraction: `src/core/llm.py` (`configure_litellm`, `provider_credentials`, `embed_texts`); `litellm.acompletion` / `litellm.aembedding` replace the OpenAI SDK, so one model identifier selects OpenAI, Anthropic Claude, OpenRouter, Azure, or an OpenAI-compatible gateway; `OPENAI_API_KEY` / `OPENAI_BASE_URL` reach OpenAI-routed models only; autouse test guard fails un-mocked calls | Complete |
+| Split 4 | Multi-container Docker Compose (`docker/docker-compose.yml`): `postgres:16-alpine` (`db`), `api` running `alembic upgrade head` before Uvicorn, optional standalone Chroma server behind the `chroma` profile; `ChromaVectorStore` selects `PersistentClient` or `HttpClient` from `CHROMA_HOST` (ADR-07) | Complete |
+| Sprint 7 | **v2.0.0 Enterprise Core.** Monorepo migration (`apps/api/`, `docker/`; `apps/web/` reserved), PostgreSQL + Alembic audit store, LiteLLM integration, `uv` toolchain with committed `uv.lock`, multi-container Docker Compose. Split 5 closed the release: version metadata bumped to `2.0.0` (`pyproject.toml`, `uv.lock`, `main.py`, `health.py`), README and internal docs synchronised, scripts documented with `uv run --project apps/api`, 189-test suite verified | Complete |
 
 ---
 
@@ -487,7 +490,7 @@ All routers are registered under the same `/api/v1` versioning prefix.
 
 ## 3. Test Suite Inventory
 
-All 183 tests pass with `uv run --directory apps/api pytest` (`asyncio_mode = auto` is set in `pyproject.toml`). No test requires live LLM credentials or a running ChromaDB server.
+All 189 tests pass with `uv run --directory apps/api pytest` (`asyncio_mode = auto` is set in `pyproject.toml`). No test requires live LLM credentials or a running ChromaDB server.
 
 ### `tests/unit/test_health.py` — 4 tests
 
@@ -651,7 +654,7 @@ All run against `sqlite+aiosqlite:///:memory:`.
 | `test_result_preserves_descending_score_ordering` | Returned list is sorted by descending score |
 | `test_zero_budget_drops_all_chunks` | `max_context_tokens=0` drops all chunks |
 
-### `tests/unit/test_rag_engine.py` — 13 tests
+### `tests/unit/test_rag_engine.py` — 14 tests
 
 **`TestRAGEngineQuery` (9)**
 
@@ -667,13 +670,14 @@ All run against `sqlite+aiosqlite:///:memory:`.
 | `test_llm_refusal_returns_empty_citations` | LLM refusal phrase returns an empty citation list |
 | `test_token_budget_is_applied_before_completion` | `fit_contexts_to_budget` is called with the filtered chunk list |
 
-**`TestRAGEngineStream` (4)**
+**`TestRAGEngineStream` (5)**
 
 | Test | What it verifies |
 |---|---|
 | `test_stream_query_yields_fallback_when_no_chunks_pass_threshold` | Exactly the refusal phrase is yielded; LLM not called |
 | `test_stream_query_yields_tokens_sequentially` | Streaming tokens are yielded in the order they arrive |
 | `test_stream_query_skips_none_delta_content` | `None` delta content (role announcement chunk) is skipped |
+| `test_stream_query_skips_chunks_without_choices` | Usage-only trailing chunks with empty `choices` do not raise |
 | `test_stream_query_empty_similarity_result_yields_fallback` | Empty similarity result triggers the stream fallback |
 
 ### `tests/integration/test_api_query.py` — 9 tests
@@ -795,7 +799,7 @@ All run against `sqlite+aiosqlite:///:memory:`.
 
 Cover LiteLLM credential routing (OpenAI credentials reach only OpenAI-routed models), `configure_litellm` global flags, dict/object embedding-item normalisation, and ingestion batching via a patched `litellm.aembedding`. `tests/conftest.py` sets `LITELLM_LOCAL_MODEL_COST_MAP=True` and installs an autouse guard that makes any un-mocked `litellm.acompletion`/`aembedding` call fail.
 
-### `tests/unit/test_settings.py` — 14 tests
+### `tests/unit/test_settings.py` — 16 tests
 
 **`TestOpenAIBaseUrl` (6)**
 
@@ -825,6 +829,24 @@ Cover LiteLLM credential routing (OpenAI credentials reach only OpenAI-routed mo
 | `test_app_port_default` | `app_port` defaults to `8000` |
 | `test_log_level_default` | `log_level` defaults to `INFO` |
 | `test_openai_base_url_defaults_to_none` | Default configuration keeps `openai_base_url` as `None` |
+
+**`TestChromaRemoteSettings` (2)**
+
+| Test | What it verifies |
+|---|---|
+| `test_defaults_to_local_mode` | `chroma_host` is `None` and `chroma_port` is `8000` when unset |
+| `test_reads_host_and_port_from_env` | `CHROMA_HOST` and `CHROMA_PORT` resolve from the environment |
+
+### `tests/unit/test_vector_store.py` — 4 tests
+
+**`TestClientSelection` (4)** — both Chroma client constructors are patched; no server is contacted.
+
+| Test | What it verifies |
+|---|---|
+| `test_local_mode_uses_persistent_client` | Without `chroma_host`, `chromadb.PersistentClient` is built with `chroma_persist_directory` |
+| `test_host_set_uses_http_client` | With `chroma_host`, `chromadb.HttpClient` is built with the configured host and port |
+| `test_empty_host_falls_back_to_local_mode` | An empty `CHROMA_HOST` (Compose interpolation of an unset variable) selects local mode |
+| `test_remote_collection_receives_cosine_metadata_and_chunks` | The remote collection is created with cosine HNSW metadata and receives the chunk ids |
 
 ### `tests/integration/test_ingestion_api.py` — 5 tests
 
@@ -928,3 +950,9 @@ The SSE event format follows the [WHATWG EventSource](https://html.spec.whatwg.o
 - LiteLLM is process-global: no provider client is constructed or injected; `configure_litellm` applies its flags once at startup.
 - Documents indexed via `POST /api/v1/ingest/file` are immediately queryable via `POST /api/v1/query/` without any cache invalidation, replica lag, or consistency delay — both paths share the same `ChromaVectorStore` instance.
 - `TokenBudgetManager` loads the `cl100k_base` tiktoken BPE vocabulary once and caches the `tiktoken.Encoding` object on the instance, avoiding repeated BPE vocabulary deserialisation across requests.
+
+---
+
+### ADR-07 — Multi-Container Compose Topology with Migrate-on-Start
+
+Ratified in Sprint 7. The full record (PostgreSQL `db`, `api` running `alembic upgrade head` before Uvicorn, optional `chroma` profile, `PersistentClient` / `HttpClient` selection) lives in [`architecture.md` §8](architecture.md#8-architectural-decision-log--sprints-37).

@@ -4,7 +4,7 @@ Generates minimal valid sample files, runs each through
 ``DocumentLoaderFactory.get_loader()`` and ``load()``, and prints a summary table.
 
 Usage:
-    python scripts/verify_all_loaders.py
+    uv run --project apps/api python scripts/verify_all_loaders.py
 """
 
 from __future__ import annotations

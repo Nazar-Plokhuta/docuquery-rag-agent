@@ -47,6 +47,6 @@ async def health_check(
     return HealthResponse(
         status="ok",
         app_name="DocuQuery RAG Agent",
-        version="1.2.0",
+        version="2.0.0",
         environment=settings.app_env,
     )
