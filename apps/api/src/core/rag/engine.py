@@ -27,7 +27,7 @@ import litellm
 
 from src.config.settings import Settings
 from src.core.interfaces import AuditRepositoryInterface, VectorStoreInterface
-from src.core.llm import embed_texts, provider_credentials
+from src.core.llm import embed_texts, provider_credentials, translate_litellm_errors
 from src.core.models import Citation, RAGResult, RetrievalResult, TelemetryRecord
 from src.core.rag.prompts import FALLBACK_REFUSAL_MESSAGE, build_rag_prompt
 from src.core.rag.token_counter import TokenBudgetManager
@@ -194,6 +194,10 @@ class RAGEngine:
         Returns:
             A fully populated ``RAGResult`` carrying the grounded answer,
             source citations, latency, and token usage figures.
+
+        Raises:
+            LLMProviderError: If the embedding or chat provider fails.
+            StorageError: If the vector store query fails.
         """
         start_time = time.perf_counter()
 
@@ -232,12 +236,13 @@ class RAGEngine:
         contexts = [chunk.chunk.content for chunk in budgeted_chunks]
         messages = build_rag_prompt(query=query_text, retrieved_contexts=contexts)
 
-        completion = await litellm.acompletion(
-            model=self._settings.openai_model,
-            messages=messages,
-            temperature=0.0,
-            **provider_credentials(self._settings.openai_model, self._settings),
-        )
+        with translate_litellm_errors(self._settings.openai_model, "chat completion"):
+            completion = await litellm.acompletion(
+                model=self._settings.openai_model,
+                messages=messages,
+                temperature=0.0,
+                **provider_credentials(self._settings.openai_model, self._settings),
+            )
 
         answer: str = completion.choices[0].message.content or FALLBACK_REFUSAL_MESSAGE
         usage = completion.usage
@@ -308,6 +313,11 @@ class RAGEngine:
             Individual token delta strings from the LLM completion stream.
             Yields exactly ``FALLBACK_REFUSAL_MESSAGE`` and returns immediately
             if no chunks survive threshold filtering.
+
+        Raises:
+            LLMProviderError: If the embedding or chat provider fails, before the
+                first token or between tokens.
+            StorageError: If the vector store query fails.
         """
         filtered_chunks = await self._retrieve_and_filter(query_text, top_k, score_threshold)
 
@@ -325,18 +335,21 @@ class RAGEngine:
         contexts = [chunk.chunk.content for chunk in budgeted_chunks]
         messages = build_rag_prompt(query=query_text, retrieved_contexts=contexts)
 
-        stream = await litellm.acompletion(
-            model=self._settings.openai_model,
-            messages=messages,
-            temperature=0.0,
-            stream=True,
-            **provider_credentials(self._settings.openai_model, self._settings),
-        )
+        # The guard spans the consuming loop as well: a provider can fail after the
+        # stream opened, and that fault must surface as a domain error too.
+        with translate_litellm_errors(self._settings.openai_model, "chat completion"):
+            stream = await litellm.acompletion(
+                model=self._settings.openai_model,
+                messages=messages,
+                temperature=0.0,
+                stream=True,
+                **provider_credentials(self._settings.openai_model, self._settings),
+            )
 
-        async for chunk in stream:
-            # Providers may emit trailing chunks without choices (e.g. usage-only).
-            if not chunk.choices:
-                continue
-            delta_content: str | None = chunk.choices[0].delta.content
-            if delta_content:
-                yield delta_content
+            async for chunk in stream:
+                # Providers may emit trailing chunks without choices (e.g. usage-only).
+                if not chunk.choices:
+                    continue
+                delta_content: str | None = chunk.choices[0].delta.content
+                if delta_content:
+                    yield delta_content

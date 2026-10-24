@@ -346,6 +346,8 @@ data: {"token": "-GCM"}
 data: [DONE]
 ```
 
+**Failures.** A fault before the first token (embedding, retrieval, opening the completion) is an ordinary HTTP error with a `{"error", "message"}` JSON body: `502` provider rejected the request or credentials, `429` rate limit or quota, `503` provider or storage unavailable, `504` provider timeout. A fault after streaming has begun cannot change the committed `200`, so it arrives in-band as a final `data: {"error": "LLMUnavailableError", "message": "..."}` frame, still followed by `data: [DONE]`. The same `{error, message}` envelope covers ingestion: unparseable files return `422`, and no error is ever served as bare `text/plain`.
+
 ---
 
 ### Telemetry & Latency Audit
@@ -403,7 +405,9 @@ All LLM completions and embeddings are routed through [LiteLLM](https://docs.lit
 | vLLM / LocalAI / any OpenAI-compatible gateway | `openai/<served-model>` | `OPENAI_API_KEY` + `OPENAI_BASE_URL` (e.g. `http://localhost:8001/v1`) |
 | Azure OpenAI | `azure/<deployment>` | `AZURE_API_KEY`, `AZURE_API_BASE`, `AZURE_API_VERSION` |
 
-`OPENAI_API_KEY` and `OPENAI_BASE_URL` are forwarded **only** to OpenAI-routed models, so they never leak to another vendor. Other providers read their own environment variables (LiteLLM also loads a `.env` file). Use an explicit `provider/` prefix for non-OpenAI models. `EMBEDDING_MODEL` follows the same rules, and `LITELLM_DROP_PARAMS=true` (default) lets LiteLLM drop request parameters a provider does not support.
+`OPENAI_API_KEY` and `OPENAI_BASE_URL` are forwarded **only** to OpenAI-routed models, so they never leak to another vendor. Other providers read their own environment variables (LiteLLM also loads a `.env` file). Use an explicit `provider/` prefix for non-OpenAI models. `LITELLM_DROP_PARAMS=true` (default) lets LiteLLM drop request parameters a provider does not support.
+
+> **`OPENAI_MODEL` and `EMBEDDING_MODEL` are routed independently.** An unprefixed `EMBEDDING_MODEL` (the default `text-embedding-3-small`) goes to OpenAI and needs a real `OPENAI_API_KEY`, even when chat completions run on OpenRouter. With only an `OPENROUTER_API_KEY`, prefix both: `OPENAI_MODEL=openrouter/google/gemini-2.5-flash` and `EMBEDDING_MODEL=openrouter/openai/text-embedding-3-small`. The latter returns the same vectors as the bare OpenAI name (cosine ≈ 0.9999), so switching between the two keeps an existing index valid; any other embedding model changes the vector space and requires re-ingesting every document. The API logs a startup warning for model/credential combinations that cannot work.
 
 ---
 
@@ -559,7 +563,7 @@ The shared `.env` at the repository root is located by absolute path, so it is f
 > uv run --directory apps/api alembic check          # fail when models and migrations drift
 > ```
 
-> **Other providers & gateways:** Set `OPENAI_MODEL=anthropic/claude-sonnet-4-5` with `ANTHROPIC_API_KEY`, `OPENAI_MODEL=openrouter/<vendor>/<model>` with `OPENROUTER_API_KEY`, or `OPENAI_MODEL=openai/<model>` with `OPENAI_BASE_URL` for vLLM/LocalAI. Anthropic has no embedding endpoint, so keep `EMBEDDING_MODEL` on an embedding-capable provider. No code changes required.
+> **Other providers & gateways:** Set `OPENAI_MODEL=anthropic/claude-sonnet-4-5` with `ANTHROPIC_API_KEY`, `OPENAI_MODEL=openrouter/<vendor>/<model>` with `OPENROUTER_API_KEY`, or `OPENAI_MODEL=openai/<model>` with `OPENAI_BASE_URL` for vLLM/LocalAI. Anthropic has no embedding endpoint, so point `EMBEDDING_MODEL` at an embedding-capable provider (e.g. `openrouter/openai/text-embedding-3-small`). No code changes required.
 
 ---
 

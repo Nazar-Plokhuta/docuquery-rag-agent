@@ -411,7 +411,7 @@ Telemetry is not logged for streaming queries because provider streams do not in
 
 **Endpoints:** `POST /api/v1/query/` and `POST /api/v1/query/stream`
 
-The non-streaming endpoint delegates to `RAGEngine.query()` and serialises the result as `QueryResponse`. The streaming endpoint wraps `RAGEngine.stream_query()` in an `_event_generator()` async generator that formats each token delta as a `data: {"token": "..."}\n\n` SSE event and appends `data: [DONE]\n\n` after the generator is exhausted.
+The non-streaming endpoint delegates to `RAGEngine.query()` and serialises the result as `QueryResponse`. The streaming endpoint awaits the first token of `RAGEngine.stream_query()` before building the `StreamingResponse`, so faults raised before any output become real HTTP errors via `app_exception_handler`. Its `_event_generator()` then formats each token delta as a `data: {"token": "..."}\n\n` SSE event and appends `data: [DONE]\n\n`; a fault after streaming began is emitted as a final `data: {"error": "<Type>", "message": "..."}\n\n` frame before `[DONE]`.
 
 Both endpoints share the same `QueryRequest` DTO, which enforces `extra="forbid"` and `min_length=1` on `query`.
 

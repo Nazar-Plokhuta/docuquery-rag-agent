@@ -62,7 +62,7 @@ apps/api/src/
 - `models.py` — Frozen Pydantic v2 models (`DocumentChunk`, `RetrievalResult`, `TelemetryRecord`). These are the canonical data contracts shared across all layers.
 - `interfaces.py` — Abstract base classes (`VectorStoreInterface`, `AuditRepositoryInterface`). All storage consumers depend on these ABCs, never on concrete implementations.
 - `llm.py` — LiteLLM gateway helpers: `configure_litellm` (global flags, applied once in the lifespan), `provider_credentials` (per-model credential routing), and `embed_texts` (`litellm.aembedding`). `RAGEngine` calls `litellm.acompletion` with the same credentials. Every completion and embedding goes through LiteLLM; no provider SDK (`openai`, `anthropic`) is imported anywhere. The model identifier alone selects the provider (OpenAI, Anthropic Claude, OpenRouter, Azure, or an OpenAI-compatible gateway such as vLLM), and `OPENAI_API_KEY` / `OPENAI_BASE_URL` are forwarded to OpenAI-routed models only.
-- `exceptions.py` — `AppException` base and its concrete subclasses (`ConfigurationError`, `ResourceNotFoundError`, `StorageError`). All domain faults are expressed as typed subclasses of `AppException`.
+- `exceptions.py` — `AppException` base and its concrete subclasses (`ConfigurationError`, `ResourceNotFoundError`, `StorageError`, `DocumentParsingError`, `UnsupportedFileTypeError`, and the `LLMProviderError` family). All domain faults are expressed as typed subclasses of `AppException`.
 
 No I/O, no driver imports, no business logic belongs here.
 
@@ -138,8 +138,12 @@ All endpoints are served under the `/api/v1` versioning prefix. OpenAPI document
 SSE event format:
 ```
 data: {"token": "<delta_text>"}\n\n   — one event per token from the LiteLLM stream
+data: {"error": "<Type>", "message": "<text>"}\n\n
+                                       — terminal failure after the stream began
 data: [DONE]\n\n                       — explicit stream termination sentinel
 ```
+
+**Failure transport.** The route awaits the first token *before* constructing the `StreamingResponse`. A `StreamingResponse` commits its `200` status the moment it starts, so a fault in embedding, retrieval or the completion handshake would otherwise tear the connection down mid-body; reverse proxies (including the Next.js rewrite) turn that into an empty reply that a browser can only report as "unreachable". Raising before the response exists routes the fault through `app_exception_handler`, so the client receives the domain status and `{error, message}` JSON. A fault after the first token can only be reported in-band as the `error` event above, always followed by `[DONE]`.
 
 **Proxy bypass headers:** `Cache-Control: no-cache` and `X-Accel-Buffering: no` are set unconditionally to prevent nginx and CDN reverse proxies from buffering the event stream (see ADR-05).  
 **Telemetry:** Not logged for streaming queries; provider streams do not return a usage object in standard responses.
@@ -385,10 +389,19 @@ Application code must never raise bare `Exception` or `RuntimeError` at the doma
 |---|---|---|
 | `ResourceNotFoundError` | 404 | Requested document or entity not found |
 | `StorageError` | 503 | ChromaDB or audit database operation failure |
+| `DocumentParsingError` | 422 | Corrupted, encrypted or empty upload (every pypdf fault is folded into this) |
+| `UnsupportedFileTypeError` | 415 | No loader registered for the extension |
+| `LLMProviderError` | 502 | Provider rejected the request (bad model identifier, invalid request) |
+| `LLMAuthenticationError` | 502 | Provider rejected the configured credentials |
+| `LLMRateLimitError` | 429 | Provider rate limit or exhausted quota |
+| `LLMUnavailableError` | 503 | Provider unreachable or server-side fault |
+| `LLMTimeoutError` | 504 | Provider did not answer in time |
 | `ConfigurationError` | 500 | Missing or invalid settings at boot time |
 | `AppException` (catch-all) | 500 | Any other domain fault |
 
-The centralised `app_exception_handler` in `src/main.py` translates all `AppException` subclasses to structured JSON error envelopes without leaking stack traces or internal paths.
+The centralised `app_exception_handler` in `src/main.py` translates all `AppException` subclasses to structured JSON error envelopes without leaking stack traces or internal paths. Status resolution walks the exception's MRO, so a subclass without its own table entry inherits its closest ancestor's status instead of degrading to 500. A second handler registered for plain `Exception` answers any other fault with `{"error": "InternalServerError", "message": ...}` rather than Starlette's bare `text/plain` body.
+
+**Provider faults.** `src/core/llm.py` is the only module that knows LiteLLM's exception vocabulary. `translate_litellm_errors()` wraps every `litellm.acompletion` / `aembedding` call (and the streaming consumer loop) and re-raises as the `LLMProviderError` family. Messages are built from the exception class and HTTP status only; raw provider text is logged at `WARNING` and never returned, because it can echo masked credentials or prompt fragments. At startup `audit_llm_configuration()` logs a warning for model/credential combinations that cannot work (for example an unprefixed `EMBEDDING_MODEL` with no real `OPENAI_API_KEY`); it never blocks boot.
 
 ### 7.6 Secrets Isolation
 

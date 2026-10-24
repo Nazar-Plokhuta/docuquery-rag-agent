@@ -5,11 +5,26 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import litellm
 import pytest
 
-from src.config.settings import Settings
-from src.core.llm import configure_litellm, embed_texts, provider_credentials
+from src.config.settings import OPENAI_PLACEHOLDER_API_KEY, Settings
+from src.core.exceptions import (
+    LLMAuthenticationError,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+    LLMUnavailableError,
+)
+from src.core.llm import (
+    audit_llm_configuration,
+    configure_litellm,
+    embed_texts,
+    provider_credentials,
+    resolve_provider,
+    translate_litellm_errors,
+)
 
 
 def _settings(**overrides: object) -> Settings:
@@ -85,3 +100,190 @@ class TestEmbedTexts:
         monkeypatch.setattr("litellm.aembedding", AsyncMock(return_value=response))
 
         assert await embed_texts(["a"], _settings()) == [[0.5]]
+
+
+def _provider_fault(error_class: type[Exception], provider: str = "openai") -> Exception:
+    """Instantiate a LiteLLM exception the way a failed provider call would."""
+    request = httpx.Request("POST", "https://provider.test/v1")
+    # Two classes have a mandatory transport argument the others default.
+    extra: dict[str, object] = {}
+    if error_class is litellm.PermissionDeniedError:
+        extra["response"] = httpx.Response(403, request=request)
+    elif error_class is litellm.APIConnectionError:
+        extra["request"] = request
+    return error_class(message="provider said no", model="m", llm_provider=provider, **extra)  # type: ignore[call-arg]
+
+
+class TestTranslateLiteLLMErrors:
+    """Provider faults must leave the LLM layer as domain exceptions."""
+
+    @pytest.mark.parametrize(
+        ("error_class", "expected"),
+        [
+            (litellm.AuthenticationError, LLMAuthenticationError),
+            (litellm.PermissionDeniedError, LLMAuthenticationError),
+            (litellm.RateLimitError, LLMRateLimitError),
+            (litellm.Timeout, LLMTimeoutError),
+            (litellm.APIConnectionError, LLMUnavailableError),
+            (litellm.ServiceUnavailableError, LLMUnavailableError),
+            (litellm.InternalServerError, LLMUnavailableError),
+            (litellm.BadGatewayError, LLMUnavailableError),
+            (litellm.NotFoundError, LLMProviderError),
+            (litellm.BadRequestError, LLMProviderError),
+        ],
+    )
+    def test_maps_exception_class_to_domain_type(
+        self, error_class: type[Exception], expected: type[LLMProviderError]
+    ) -> None:
+        fault = _provider_fault(error_class)
+
+        with (
+            pytest.raises(LLMProviderError) as excinfo,
+            translate_litellm_errors("gpt-4o-mini", "chat completion"),
+        ):
+            raise fault
+
+        assert type(excinfo.value) is expected
+        assert excinfo.value.__cause__ is fault
+
+    def test_authentication_message_for_bare_embedding_model_suggests_rerouting(self) -> None:
+        with (
+            pytest.raises(LLMAuthenticationError) as excinfo,
+            translate_litellm_errors("text-embedding-3-small", "embedding"),
+        ):
+            raise _provider_fault(litellm.AuthenticationError)
+
+        message = excinfo.value.message
+        assert "The openai provider rejected the credentials" in message
+        assert "OPENAI_API_KEY" in message
+        assert "EMBEDDING_MODEL" in message
+        assert "openrouter/openai/text-embedding-3-small" in message
+
+    def test_authentication_message_for_openrouter_names_its_key(self) -> None:
+        with (
+            pytest.raises(LLMAuthenticationError) as excinfo,
+            translate_litellm_errors("openrouter/google/gemini-2.5-flash", "chat completion"),
+        ):
+            raise _provider_fault(litellm.AuthenticationError, provider="openrouter")
+
+        assert "OPENROUTER_API_KEY" in excinfo.value.message
+
+    def test_message_never_echoes_raw_provider_text(self) -> None:
+        leaky = litellm.AuthenticationError(
+            message="Incorrect API key provided: sk-live-ABCDEF***XYZ for org-secret",
+            model="m",
+            llm_provider="openai",
+        )
+
+        with (
+            pytest.raises(LLMAuthenticationError) as excinfo,
+            translate_litellm_errors("gpt-4o-mini", "chat completion"),
+        ):
+            raise leaky
+
+        assert "sk-live" not in excinfo.value.message
+        assert "org-secret" not in excinfo.value.message
+
+    def test_unrelated_exceptions_pass_through_untranslated(self) -> None:
+        with (
+            pytest.raises(ValueError, match="boom"),
+            translate_litellm_errors("gpt-4o-mini", "chat completion"),
+        ):
+            raise ValueError("boom")
+
+
+class TestEmbedTextsErrors:
+    async def test_provider_authentication_failure_becomes_domain_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock = AsyncMock(side_effect=_provider_fault(litellm.AuthenticationError))
+        monkeypatch.setattr("litellm.aembedding", mock)
+
+        with pytest.raises(LLMAuthenticationError, match="EMBEDDING_MODEL"):
+            await embed_texts(["a"], _settings())
+
+    async def test_rate_limit_becomes_domain_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock = AsyncMock(side_effect=_provider_fault(litellm.RateLimitError))
+        monkeypatch.setattr("litellm.aembedding", mock)
+
+        with pytest.raises(LLMRateLimitError):
+            await embed_texts(["a"], _settings())
+
+
+class TestResolveProvider:
+    @pytest.mark.parametrize(
+        ("model", "provider"),
+        [
+            ("text-embedding-3-small", "openai"),
+            ("openrouter/openai/text-embedding-3-small", "openrouter"),
+            ("anthropic/claude-sonnet-4-5", "anthropic"),
+            ("no-such-provider-model-xyz", None),
+        ],
+    )
+    def test_resolves_provider_from_prefix(self, model: str, provider: str | None) -> None:
+        assert resolve_provider(model) == provider
+
+
+class TestAuditLLMConfiguration:
+    """Startup audit: report combinations that are certain to fail, never raise."""
+
+    def test_flags_bare_embedding_model_with_placeholder_openai_key(self) -> None:
+        """The reported deployment: OpenRouter chat model, bare embedding model, no OpenAI key."""
+        settings = _settings(
+            openai_api_key=OPENAI_PLACEHOLDER_API_KEY,
+            openai_model="openrouter/google/gemini-2.5-flash",
+            embedding_model="text-embedding-3-small",
+        )
+
+        problems = audit_llm_configuration(settings)
+
+        assert len(problems) == 1
+        assert "EMBEDDING_MODEL='text-embedding-3-small'" in problems[0]
+        assert "OPENAI_API_KEY" in problems[0]
+        assert "openrouter/openai/text-embedding-3-small" in problems[0]
+
+    @pytest.mark.parametrize("key", ["", "   ", OPENAI_PLACEHOLDER_API_KEY])
+    def test_flags_unset_or_placeholder_openai_key_for_both_models(self, key: str) -> None:
+        problems = audit_llm_configuration(_settings(openai_api_key=key))
+
+        assert len(problems) == 2
+        assert {p.split("=")[0] for p in problems} == {"OPENAI_MODEL", "EMBEDDING_MODEL"}
+
+    def test_accepts_real_openai_key(self) -> None:
+        assert audit_llm_configuration(_settings(openai_api_key="sk-real")) == []
+
+    def test_flags_missing_key_of_non_openai_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "litellm.validate_environment",
+            lambda model: {"keys_in_environment": False, "missing_keys": ["OPENROUTER_API_KEY"]},
+        )
+        settings = _settings(
+            openai_model="openrouter/google/gemini-2.5-flash",
+            embedding_model="openrouter/openai/text-embedding-3-small",
+        )
+
+        problems = audit_llm_configuration(settings)
+
+        assert len(problems) == 2
+        assert all("OPENROUTER_API_KEY is not set" in p for p in problems)
+
+    def test_accepts_non_openai_provider_with_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "litellm.validate_environment",
+            lambda model: {"keys_in_environment": True, "missing_keys": []},
+        )
+        settings = _settings(
+            openai_api_key=OPENAI_PLACEHOLDER_API_KEY,
+            openai_model="openrouter/google/gemini-2.5-flash",
+            embedding_model="openrouter/openai/text-embedding-3-small",
+        )
+
+        assert audit_llm_configuration(settings) == []
+
+    def test_flags_model_without_resolvable_provider(self) -> None:
+        problems = audit_llm_configuration(_settings(embedding_model="no-such-provider-model-xyz"))
+
+        assert len(problems) == 1
+        assert "does not resolve to a known provider" in problems[0]

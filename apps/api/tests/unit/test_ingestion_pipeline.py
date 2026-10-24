@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import litellm
 import pytest
 
 from src.config.settings import Settings
+from src.core.exceptions import LLMAuthenticationError
 from src.ingestion.chunker import TokenSlidingWindowChunker
 from src.ingestion.pipeline import _EMBEDDING_BATCH_SIZE, IngestionPipeline
 
@@ -90,3 +93,41 @@ class TestIngestionPipelineEmbedding:
 
         assert await pipeline.ingest_document(doc) == 0
         aembedding.assert_not_called()
+
+
+class TestIngestionPipelineFailureModes:
+    async def test_chunking_runs_off_the_event_loop(self, tmp_path: Path) -> None:
+        """CPU-bound tokenisation must not execute on the thread serving requests."""
+        doc = tmp_path / "doc.txt"
+        doc.write_text("hello")
+        chunker = MagicMock(spec=TokenSlidingWindowChunker)
+        chunking_thread: list[int] = []
+
+        def _record_thread(*_args: object) -> list[object]:
+            chunking_thread.append(threading.get_ident())
+            return []
+
+        chunker.chunk_document.side_effect = _record_thread
+        pipeline = IngestionPipeline(chunker, MagicMock(), _settings())
+
+        await pipeline.ingest_document(doc)
+
+        assert chunking_thread
+        assert chunking_thread[0] != threading.get_ident()
+
+    async def test_embedding_provider_failure_propagates_as_domain_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rejected embedding key must reach the route as ``LLMAuthenticationError``."""
+        doc = tmp_path / "doc.txt"
+        doc.write_text("hello")
+        fault = litellm.AuthenticationError(message="no", model="m", llm_provider="openai")
+        monkeypatch.setattr("litellm.aembedding", AsyncMock(side_effect=fault))
+        vector_store = MagicMock()
+        vector_store.add_documents = AsyncMock()
+        pipeline = IngestionPipeline(_stub_chunker(3), vector_store, _settings())
+
+        with pytest.raises(LLMAuthenticationError, match="EMBEDDING_MODEL"):
+            await pipeline.ingest_document(doc)
+
+        vector_store.add_documents.assert_not_called()

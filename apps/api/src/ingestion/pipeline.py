@@ -83,6 +83,11 @@ class IngestionPipeline:
         Returns:
             Total number of ``DocumentChunk`` objects successfully ingested.
             Returns 0 for empty documents without raising.
+
+        Raises:
+            DocumentParsingError: If the file cannot be parsed into text.
+            LLMProviderError: If the embedding provider fails or rejects the request.
+            StorageError: If the vector store write fails.
         """
         document_id: str = file_path.stem
         file_bytes: bytes = await asyncio.to_thread(file_path.read_bytes)
@@ -90,7 +95,9 @@ class IngestionPipeline:
         loaded = await loader.load(file_bytes, file_path.name)
         text: str = loaded.content
 
-        chunks = self._chunker.chunk_document(document_id, text)
+        # Tokenisation is CPU-bound and grows superlinearly with document size; run
+        # inline it would stall every other request (health probes included).
+        chunks = await asyncio.to_thread(self._chunker.chunk_document, document_id, text)
         if not chunks:
             logger.warning("Document %r produced zero chunks — nothing ingested.", file_path)
             return 0

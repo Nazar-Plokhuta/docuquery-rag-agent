@@ -60,3 +60,36 @@ class UnsupportedFileTypeError(AppException):
 
     Maps to HTTP 415 at the presentation layer when raised from the domain layer.
     """
+
+
+class LLMProviderError(AppException):
+    """Raised when a chat or embedding provider fails or rejects a request.
+
+    Wraps LiteLLM's provider exceptions so a vendor fault surfaces as a
+    structured gateway error instead of an unhandled 500. The message names the
+    provider, model and remedy but never carries raw provider payloads, which
+    may echo credentials or prompt content. Maps to HTTP 502 at the
+    presentation layer; subclasses refine the status.
+    """
+
+
+class LLMAuthenticationError(LLMProviderError):
+    """Raised when the provider rejects the configured credentials (HTTP 502)."""
+
+
+class LLMRateLimitError(LLMProviderError):
+    """Raised when the provider throttles the request or the quota is exhausted.
+
+    Maps to HTTP 429 so clients can apply their usual backoff.
+    """
+
+
+class LLMUnavailableError(LLMProviderError):
+    """Raised when the provider cannot be reached or reports a server-side fault.
+
+    Maps to HTTP 503.
+    """
+
+
+class LLMTimeoutError(LLMUnavailableError):
+    """Raised when the provider does not answer within the request timeout (HTTP 504)."""

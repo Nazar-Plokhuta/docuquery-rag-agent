@@ -1,5 +1,7 @@
 export type SseEvent =
   | { type: "token"; token: string }
+  // A failure after the status line was committed: `{ error, message }`.
+  | { type: "error"; error: string; message: string }
   | { type: "done" };
 
 export interface SseParser {
@@ -28,13 +30,18 @@ function parseEvent(block: string): SseEvent | null {
 
   try {
     const parsed: unknown = JSON.parse(payload);
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      "token" in parsed &&
-      typeof parsed.token === "string"
-    ) {
-      return { type: "token", token: parsed.token };
+    if (typeof parsed === "object" && parsed !== null) {
+      if ("token" in parsed && typeof parsed.token === "string") {
+        return { type: "token", token: parsed.token };
+      }
+      if (
+        "error" in parsed &&
+        typeof parsed.error === "string" &&
+        "message" in parsed &&
+        typeof parsed.message === "string"
+      ) {
+        return { type: "error", error: parsed.error, message: parsed.message };
+      }
     }
   } catch {
     // A single malformed frame must not discard the answer streamed so far.
@@ -44,7 +51,8 @@ function parseEvent(block: string): SseEvent | null {
 
 /**
  * Incremental parser for the `data: <json>\n\n` frames emitted by
- * `POST /api/v1/query/stream`.
+ * `POST /api/v1/query/stream`: token deltas, an optional terminal error
+ * frame, and the `[DONE]` sentinel.
  *
  * It is transport-agnostic: callers decode bytes themselves (with
  * `TextDecoder({ stream: true })`, so multi-byte characters split across

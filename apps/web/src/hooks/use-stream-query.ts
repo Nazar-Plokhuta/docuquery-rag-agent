@@ -44,6 +44,9 @@ export interface StreamQuery {
   reset: () => void;
 }
 
+/** How a stream that reached its terminator ended. */
+type StreamEnd = { failed: false } | { failed: true; message: string };
+
 const STREAM_INTERRUPTED_MESSAGE = "The connection was lost while streaming.";
 const UNEXPECTED_ERROR_MESSAGE = "Unexpected error while reading the stream.";
 const EMPTY_STREAM_MESSAGE = "The stream ended before any content arrived.";
@@ -124,10 +127,15 @@ export function useStreamQuery(): StreamQuery {
         return result("error", message);
       };
 
-      // Applies parsed events; returns true once the `[DONE]` sentinel is seen.
-      const apply = (events: SseEvent[]): boolean => {
+      // Applies parsed events; returns how the stream ended once it did: the
+      // `[DONE]` sentinel, or an in-band error frame (the server sends one when
+      // it fails after the 200 status line is already committed).
+      const apply = (events: SseEvent[]): StreamEnd | null => {
         for (const event of events) {
-          if (event.type === "done") return true;
+          if (event.type === "done") return { failed: false };
+          if (event.type === "error") {
+            return { failed: true, message: event.message };
+          }
           if (firstTokenMs === null) {
             firstTokenMs = performance.now() - startedAt;
             if (isCurrent()) setStatus("streaming");
@@ -136,7 +144,7 @@ export function useStreamQuery(): StreamQuery {
           accumulatedRef.current += event.token;
           if (isCurrent()) schedulePublish();
         }
-        return false;
+        return null;
       };
 
       try {
@@ -165,26 +173,28 @@ export function useStreamQuery(): StreamQuery {
         const decoder = new TextDecoder();
         const parser = createSseParser();
 
-        let finished = false;
+        let end: StreamEnd | null = null;
         try {
-          while (!finished) {
+          while (end === null) {
             const { done, value } = await reader.read();
             if (done) break;
-            finished = apply(parser.push(decoder.decode(value, { stream: true })));
+            end = apply(parser.push(decoder.decode(value, { stream: true })));
           }
         } catch (readError) {
           if (isAbortError(readError)) throw readError;
           return fail(STREAM_INTERRUPTED_MESSAGE);
         }
 
-        if (!finished) {
-          finished = apply([
-            ...parser.push(decoder.decode()),
-            ...parser.flush(),
-          ]);
+        end ??= apply([...parser.push(decoder.decode()), ...parser.flush()]);
+
+        if (end?.failed) {
+          // Surface the server's own message; `fail` keeps the partial answer.
+          await reader.cancel().catch(() => undefined);
+          return fail(end.message);
         }
 
         publishNow();
+        const finished = end !== null;
         if (finished) {
           // Release the connection; the server has nothing left to send.
           await reader.cancel().catch(() => undefined);

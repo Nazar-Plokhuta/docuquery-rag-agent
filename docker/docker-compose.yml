@@ -77,6 +77,11 @@ services:
       context: ../apps/api
       dockerfile: Dockerfile
       target: runtime
+      args:
+        # The container user must own the bind-mounted ../data to write the Chroma
+        # index. Set both to the host owner's ids (`id -u`, `id -g`) in .env.
+        APP_UID: ${APP_UID:-1001}
+        APP_GID: ${APP_GID:-1001}
     container_name: docuquery-api
     image: docuquery-rag-agent:dev
     restart: unless-stopped

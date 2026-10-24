@@ -20,6 +20,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _API_ROOT: Path = Path(__file__).resolve().parents[2]
 _REPO_ENV_FILE: Path = _API_ROOT.parent.parent / ".env"
 
+# Template value shipped in `.env.example` and used as the field default. It is a
+# sentinel, not a credential: configuration audits compare against it to tell
+# "never configured" apart from a key the provider later rejects.
+OPENAI_PLACEHOLDER_API_KEY: str = "sk-placeholder"
+
 
 class Settings(BaseSettings):
     """Application-wide configuration resolved from the `.env` file and environment.
@@ -53,7 +58,7 @@ class Settings(BaseSettings):
     # `gpt-4o-mini`, `anthropic/claude-sonnet-4-5`, `openrouter/<vendor>/<model>`.
     # `openai_api_key`/`openai_base_url` are forwarded only to OpenAI-routed models;
     # other providers read their own env vars (`ANTHROPIC_API_KEY`, ...).
-    openai_api_key: str = "sk-placeholder"
+    openai_api_key: str = OPENAI_PLACEHOLDER_API_KEY
     openai_model: str = "gpt-4o-mini"
     embedding_model: str = "text-embedding-3-small"
     # Optional custom OpenAI-compatible gateway (vLLM, LocalAI, ...). Pair it with an

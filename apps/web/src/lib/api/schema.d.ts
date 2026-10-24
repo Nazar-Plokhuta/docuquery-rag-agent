@@ -95,7 +95,7 @@ export interface paths {
         put?: never;
         /**
          * RAG query — SSE streaming
-         * @description Stream the grounded LLM response token-by-token via Server-Sent Events. Each event carries a single token delta. The stream terminates with ``[DONE]``.
+         * @description Stream the grounded LLM response token-by-token via Server-Sent Events. Each event carries a single token delta. The stream terminates with ``[DONE]``. A fault before the first token is an ordinary HTTP error with an ``{error, message}`` body; a fault after streaming began is sent as a final ``{"error": ..., "message": ...}`` event, still followed by ``[DONE]``.
          */
         post: operations["stream_query_endpoint_api_v1_query_stream_post"];
         delete?: never;

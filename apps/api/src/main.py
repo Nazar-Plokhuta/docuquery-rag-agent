@@ -14,6 +14,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,11 +34,15 @@ from src.config.settings import Settings, get_settings
 from src.core.exceptions import (
     AppException,
     DocumentParsingError,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+    LLMUnavailableError,
     ResourceNotFoundError,
     StorageError,
     UnsupportedFileTypeError,
 )
-from src.core.llm import configure_litellm
+from src.core.llm import audit_llm_configuration, configure_litellm
 from src.core.rag.engine import RAGEngine
 from src.core.rag.token_counter import TokenBudgetManager
 from src.ingestion.chunker import TokenSlidingWindowChunker
@@ -97,6 +102,28 @@ async def _provision_directories() -> None:
     directory = Path(settings.chroma_persist_directory)
     directory.mkdir(parents=True, exist_ok=True)
     logger.info("Provisioned directory: %s", directory.resolve())
+    _warn_if_not_writable(directory)
+
+
+def _warn_if_not_writable(directory: Path) -> None:
+    """Warn at boot when this process cannot write the Chroma data directory.
+
+    A bind mount keeps the host owner's ids, so a container user with different
+    ids can read the index yet fails every ingestion with SQLite's opaque
+    "attempt to write a readonly database". Naming the cause here, at startup,
+    saves the operator a diagnosis from a failed upload.
+    """
+    if os.access(directory, os.W_OK | os.X_OK):
+        return
+    getuid = getattr(os, "getuid", None)  # absent on Windows
+    identity = f"uid {getuid()}" if getuid is not None else "the service user"
+    logger.warning(
+        "Chroma data directory %s is not writable by %s; document ingestion will fail "
+        "with a read-only database error. Grant that user write access (Docker: set "
+        "APP_UID/APP_GID in .env to the directory owner's ids and rebuild).",
+        directory.resolve(),
+        identity,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +141,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     3. Create the async SQLAlchemy engine and bootstrap the audit repository.
     4. Construct the ChromaDB vector store adapter (lazy I/O — no network call
        yet; the collection is opened on first actual read/write).
-    5. Apply global LiteLLM flags (``drop_params``, telemetry off).
+    5. Apply global LiteLLM flags (``drop_params``, telemetry off) and warn about
+       model/credential combinations that are certain to fail at request time.
     6. Construct the token budget manager (loads tiktoken BPE vocabulary).
     7. Assemble the ``RAGEngine`` with all injected dependencies.
     8. Assemble the ``IngestionPipeline`` with chunker, vector store, and
@@ -158,6 +186,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # LiteLLM keeps no client object: flags are process-global and provider
     # connections are managed per call, so there is nothing to inject or close.
     configure_litellm(settings)
+    # Warn instead of failing: health, telemetry and the web console remain
+    # usable while the operator corrects the model or credential configuration.
+    for problem in audit_llm_configuration(settings):
+        logger.warning("LLM configuration problem: %s", problem)
 
     # ── Domain / core layer ──────────────────────────────────────────────────
     token_budget = TokenBudgetManager()
@@ -242,19 +274,33 @@ install_cors(app, parse_cors_origins(get_settings()))
 # ---------------------------------------------------------------------------
 
 
+_STATUS_BY_EXCEPTION: dict[type, int] = {
+    ResourceNotFoundError: 404,
+    DocumentParsingError: 422,
+    UnsupportedFileTypeError: 415,
+    StorageError: 503,
+    # Provider faults are upstream faults, not client or server bugs: the base maps
+    # to 502 and covers authentication failures; the subclasses refine it.
+    LLMProviderError: 502,
+    LLMRateLimitError: 429,
+    LLMUnavailableError: 503,
+    LLMTimeoutError: 504,
+}
+
+
 def _exception_to_status(exc: AppException) -> int:
     """Map domain exception types to canonical HTTP status codes.
 
-    Using an explicit mapping instead of ``isinstance`` chains keeps the
-    translation logic declarative and trivially extensible.
+    The declarative table is resolved along the exception's MRO, so a subclass
+    without its own entry inherits the closest ancestor's status instead of
+    silently degrading to 500. Unmapped faults (e.g. ``ConfigurationError``)
+    are server errors.
     """
-    mapping: dict[type[AppException], int] = {
-        ResourceNotFoundError: 404,
-        DocumentParsingError: 422,
-        UnsupportedFileTypeError: 415,
-        StorageError: 503,
-    }
-    return mapping.get(type(exc), 500)
+    for exception_type in type(exc).__mro__:
+        status = _STATUS_BY_EXCEPTION.get(exception_type)
+        if status is not None:
+            return status
+    return 500
 
 
 @app.exception_handler(AppException)
@@ -275,6 +321,24 @@ async def app_exception_handler(request: Request, exc: AppException) -> JSONResp
     return JSONResponse(
         status_code=status_code,
         content={"error": exc.__class__.__name__, "message": exc.message},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Answer any fault outside the domain hierarchy with the standard error envelope.
+
+    Without this hook Starlette serves a bare ``text/plain`` "Internal Server
+    Error", which API clients cannot parse and the web console can only echo as a
+    status line. Starlette re-raises after this handler runs, so the traceback is
+    still logged by the server; the body deliberately carries no exception text.
+    """
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "InternalServerError",
+            "message": "An unexpected error occurred. See the server logs for details.",
+        },
     )
 
 

@@ -15,9 +15,12 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
+import litellm
 import pytest
 
 from src.config.settings import Settings
+from src.core.exceptions import LLMAuthenticationError, LLMRateLimitError, LLMUnavailableError
 from src.core.models import Citation, DocumentChunk, RAGResult, RetrievalResult, TelemetryRecord
 from src.core.rag.engine import RAGEngine
 from src.core.rag.prompts import FALLBACK_REFUSAL_MESSAGE
@@ -474,3 +477,85 @@ class TestRAGEngineStream:
 
         assert tokens == [FALLBACK_REFUSAL_MESSAGE]
         litellm_mocks.acompletion.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestRAGEngineProviderFailures
+# ---------------------------------------------------------------------------
+
+
+def _provider_fault(error_class: type[Exception]) -> Exception:
+    """Build a LiteLLM exception as a failing provider call would raise it."""
+    return error_class(message="provider said no", model="m", llm_provider="openai")  # type: ignore[call-arg]
+
+
+def _engine_with_one_chunk() -> tuple[RAGEngine, MagicMock]:
+    """Engine whose retrieval succeeds, so only the LLM calls can fail."""
+    retrieval_result = _make_retrieval_result(score=0.9)
+    mock_tb = MagicMock(spec=TokenBudgetManager)
+    mock_tb.fit_contexts_to_budget.return_value = [retrieval_result]
+    engine, mock_vs, mock_ar, _ = _build_engine(token_budget=mock_tb)
+    mock_vs.similarity_search = AsyncMock(return_value=[retrieval_result])
+    mock_ar.log_query = AsyncMock()
+    return engine, mock_ar
+
+
+class TestRAGEngineProviderFailures:
+    """LiteLLM faults must surface as domain errors, never as raw provider exceptions."""
+
+    async def test_query_embedding_auth_failure_skips_vector_search(
+        self, litellm_mocks: LiteLLMMocks
+    ) -> None:
+        litellm_mocks.aembedding.side_effect = _provider_fault(litellm.AuthenticationError)
+        engine, mock_vs, _, _ = _build_engine()
+        mock_vs.similarity_search = AsyncMock()
+
+        with pytest.raises(LLMAuthenticationError, match="EMBEDDING_MODEL"):
+            await engine.query("What is the SLA?")
+
+        mock_vs.similarity_search.assert_not_called()
+
+    async def test_query_completion_rate_limit_is_translated_and_not_audited(
+        self, litellm_mocks: LiteLLMMocks
+    ) -> None:
+        engine, mock_ar = _engine_with_one_chunk()
+        litellm_mocks.acompletion.side_effect = _provider_fault(litellm.RateLimitError)
+
+        with pytest.raises(LLMRateLimitError):
+            await engine.query("What is the SLA?")
+
+        mock_ar.log_query.assert_not_called()
+
+    async def test_stream_failure_before_first_token_is_translated(
+        self, litellm_mocks: LiteLLMMocks
+    ) -> None:
+        engine, _ = _engine_with_one_chunk()
+        litellm_mocks.acompletion.side_effect = _provider_fault(litellm.BadGatewayError)
+
+        with pytest.raises(LLMUnavailableError):
+            await anext(engine.stream_query("What is the SLA?"))
+
+    async def test_stream_failure_between_tokens_keeps_earlier_tokens(
+        self, litellm_mocks: LiteLLMMocks
+    ) -> None:
+        engine, _ = _engine_with_one_chunk()
+
+        async def _stream_that_dies() -> AsyncGenerator[MagicMock, None]:
+            chunk = MagicMock()
+            chunk.choices[0].delta.content = "Partial"
+            yield chunk
+            raise litellm.APIConnectionError(
+                message="connection reset",
+                model="m",
+                llm_provider="openai",
+                request=httpx.Request("POST", "https://provider.test/v1"),
+            )
+
+        litellm_mocks.acompletion.return_value = _stream_that_dies()
+
+        received: list[str] = []
+        with pytest.raises(LLMUnavailableError):
+            async for token in engine.stream_query("What is the SLA?"):
+                received.append(token)
+
+        assert received == ["Partial"]

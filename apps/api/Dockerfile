@@ -39,9 +39,15 @@ RUN uv sync --frozen --no-dev --no-install-project
 # --------------- Stage 2: lean runtime image ---------------
 FROM python:3.11-slim AS runtime
 
-# Security: run as an unprivileged user.
-RUN groupadd --gid 1001 appgroup \
-    && useradd --uid 1001 --gid appgroup --shell /bin/bash --create-home appuser
+# Security: run as an unprivileged user. The ids are build arguments because the
+# bind-mounted data/ directory keeps the host owner's ids: when they differ from
+# the container user's, ChromaDB can read its index but not write it ("attempt to
+# write a readonly database"). Set APP_UID/APP_GID to the host owner's ids
+# (`id -u` / `id -g`); the defaults keep existing builds unchanged.
+ARG APP_UID=1001
+ARG APP_GID=1001
+RUN groupadd --gid "${APP_GID}" appgroup \
+    && useradd --uid "${APP_UID}" --gid appgroup --shell /bin/bash --create-home appuser
 
 WORKDIR /app
 

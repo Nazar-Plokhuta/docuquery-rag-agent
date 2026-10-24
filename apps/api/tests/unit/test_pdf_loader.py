@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import random
+import zlib
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pypdf.errors import PdfReadError, PdfStreamError
 
 from src.core.exceptions import DocumentParsingError, UnsupportedFileTypeError
 from src.ingestion.chunker import TokenSlidingWindowChunker
@@ -150,3 +154,89 @@ def test_factory_resolves_supported_extensions() -> None:
 def test_factory_raises_for_unsupported_extension() -> None:
     with pytest.raises(UnsupportedFileTypeError, match=".exe"):
         DocumentLoaderFactory.get_loader(".exe")
+
+
+# ---------------------------------------------------------------------------
+# Lazy parser failures: pypdf raises while iterating pages / extracting text,
+# not only at construction, and not only as ``PdfReadError``.
+# ---------------------------------------------------------------------------
+
+
+class _ReaderFailingOnPages:
+    """Reader stub that constructs fine but raises when ``pages`` is first read."""
+
+    is_encrypted = False
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    @property
+    def pages(self) -> list[MagicMock]:
+        raise self._error
+
+
+def _lazy_failing_reader(
+    *, pages_error: Exception | None = None, extract_error: Exception | None = None
+) -> object:
+    """Build a reader whose failure only appears after construction succeeded."""
+    if pages_error is not None:
+        return _ReaderFailingOnPages(pages_error)
+    page = MagicMock()
+    page.extract_text.side_effect = extract_error
+    reader = MagicMock()
+    reader.is_encrypted = False
+    reader.pages = [page]
+    return reader
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pages_error", "extract_error"),
+    [
+        (PdfReadError("Expecting a NameObject for key but found 0"), None),
+        (None, PdfStreamError("Stream has ended unexpectedly")),
+        (None, KeyError("/Resources")),
+        (None, zlib.error("invalid distance too far back")),
+    ],
+    ids=["pages-PdfReadError", "extract-PdfStreamError", "extract-KeyError", "extract-zlib"],
+)
+async def test_pdf_loader_maps_lazy_parser_failures_to_parsing_error(
+    pages_error: Exception | None, extract_error: Exception | None
+) -> None:
+    reader = _lazy_failing_reader(pages_error=pages_error, extract_error=extract_error)
+
+    with (
+        patch("src.ingestion.loaders.pdf.PdfReader", return_value=reader),
+        pytest.raises(DocumentParsingError, match="corrupted or invalid") as excinfo,
+    ):
+        await PdfDocumentLoader().load(b"%PDF", "damaged.pdf")
+
+    assert excinfo.value.__cause__ is not None
+
+
+@pytest.mark.asyncio
+async def test_pdf_loader_never_leaks_parser_exceptions_on_corrupted_real_pdf() -> None:
+    """Seeded byte flips of a real PDF must load or be rejected, never escape as a 500."""
+    sample = (
+        Path(__file__).resolve().parents[4] / "data" / "sample_docs" / "security_whitepaper.pdf"
+    )
+    if not sample.is_file():
+        pytest.skip("sample PDF is not available in this checkout")
+    original = sample.read_bytes()
+
+    outcomes: set[str] = set()
+    for seed in range(12):
+        rng = random.Random(seed)
+        damaged = bytearray(original)
+        for _ in range(60):
+            damaged[rng.randrange(1024, len(damaged))] = rng.randrange(256)
+        try:
+            await PdfDocumentLoader().load(bytes(damaged), "damaged.pdf")
+        except DocumentParsingError:
+            outcomes.add("rejected")
+        else:
+            outcomes.add("loaded")
+
+    # Any other exception type propagates and fails the test; the corpus must also
+    # actually reach the rejection path or it would prove nothing.
+    assert "rejected" in outcomes

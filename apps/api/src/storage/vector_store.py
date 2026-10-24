@@ -127,20 +127,11 @@ class ChromaVectorStore(VectorStoreInterface):
         documents: list[str] = [c.content for c in chunks]
         metadatas: list[dict[str, str | int]] = [dict(c.metadata) for c in chunks]
 
-        def _add() -> None:
-            collection = asyncio.get_event_loop().run_until_complete(self._get_collection())
-            collection.add(
-                ids=ids,
-                documents=documents,
-                metadatas=metadatas,  # type: ignore[arg-type]
-                embeddings=embeddings,
-            )
-
-        # Re-acquire the collection handle safely outside the thread, then
-        # dispatch only the blocking ``.add()`` call into a thread.
-        collection = await self._get_collection()
-
         try:
+            # Resolve the handle on the event loop, then dispatch only the blocking
+            # ``.add()`` call into a worker thread. Opening the collection can fail
+            # too (unwritable data directory, corrupt index), hence inside the guard.
+            collection = await self._get_collection()
             await asyncio.to_thread(
                 collection.add,
                 ids=ids,
@@ -178,9 +169,8 @@ class ChromaVectorStore(VectorStoreInterface):
         Raises:
             StorageError: If the Chroma ``query`` call fails.
         """
-        collection = await self._get_collection()
-
         try:
+            collection = await self._get_collection()
             raw: dict = await asyncio.to_thread(  # type: ignore[type-arg]
                 collection.query,
                 query_embeddings=[query_embedding],

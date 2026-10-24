@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
 
 from src.core.exceptions import DocumentParsingError
 from src.ingestion.loaders.base import BaseDocumentLoader, LoadedDocument
@@ -22,25 +21,29 @@ def _extract_pdf_text(file_bytes: bytes, filename: str) -> LoadedDocument:
     source = Path(filename).stem
     try:
         reader = PdfReader(io.BytesIO(file_bytes))
-    except PdfReadError as exc:
+        if reader.is_encrypted:
+            raise DocumentParsingError(
+                f"Unable to read PDF {filename!r}: encrypted documents are not supported."
+            )
+
+        page_sections: list[str] = []
+        for page_index, page in enumerate(reader.pages, start=1):
+            page_text = (page.extract_text() or "").strip()
+            if page_text:
+                page_sections.append(f"## Page {page_index}\n\n{page_text}")
+        page_count = len(reader.pages)
+    except DocumentParsingError:
+        raise
+    except Exception as exc:
+        # pypdf parses lazily, so a damaged stream fails during page iteration or
+        # text extraction, not at construction, and not always with ``PdfReadError``
+        # (it also raises ``PdfStreamError``, ``LimitReachedError``, ``zlib.error``,
+        # ``KeyError``, ...). Untrusted input must never surface as a 500, so every
+        # parser fault is folded into one client-facing domain error.
+        logger.warning("pypdf failed on %r: %s: %s", filename, type(exc).__name__, exc)
         raise DocumentParsingError(
             f"Unable to read PDF {filename!r}: the file may be corrupted or invalid."
         ) from exc
-
-    if reader.is_encrypted:
-        raise DocumentParsingError(
-            f"Unable to read PDF {filename!r}: encrypted documents are not supported."
-        )
-
-    page_sections: list[str] = []
-    non_empty_pages = 0
-
-    for page_index, page in enumerate(reader.pages, start=1):
-        page_text = (page.extract_text() or "").strip()
-        if not page_text:
-            continue
-        non_empty_pages += 1
-        page_sections.append(f"## Page {page_index}\n\n{page_text}")
 
     if not page_sections:
         raise DocumentParsingError(
@@ -50,8 +53,8 @@ def _extract_pdf_text(file_bytes: bytes, filename: str) -> LoadedDocument:
     metadata: dict[str, Any] = {
         "format": "pdf",
         "filename": filename,
-        "page_count": len(reader.pages),
-        "non_empty_page_count": non_empty_pages,
+        "page_count": page_count,
+        "non_empty_page_count": len(page_sections),
     }
 
     return LoadedDocument(
