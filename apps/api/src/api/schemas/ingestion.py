@@ -16,8 +16,8 @@ class IngestResponse(BaseModel):
         status: Ingestion outcome descriptor — always ``"success"`` on the
             happy path; a domain exception propagates to the error handler
             on failure.
-        filename: Original filename of the uploaded document, preserved from
-            the multipart upload for client-side correlation.
+        filename: Sanitized basename of the uploaded document (directory
+            components stripped), echoed for client-side correlation.
         chunks_ingested: Total number of ``DocumentChunk`` objects indexed into
             the vector store. Zero indicates the document was empty or contained
             only whitespace.

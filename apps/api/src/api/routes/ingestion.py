@@ -1,8 +1,8 @@
 """Ingestion router: multipart document upload and indexing endpoint.
 
 The route validates the uploaded file extension, persists the content to a
-temporary filesystem path (preserving the original filename so the ingestion
-pipeline derives a meaningful ``document_id`` from the stem), delegates the
+dedicated temporary directory (preserving the sanitized basename so the
+ingestion pipeline derives a meaningful ``document_id`` from the stem), delegates the
 full ingestion flow to ``IngestionPipeline``, and returns an ``IngestResponse``
 confirming the number of indexed chunks.
 
@@ -35,6 +35,8 @@ _ALLOWED_EXTENSIONS: frozenset[str] = frozenset(
     {".md", ".txt", ".pdf", ".docx", ".csv", ".xlsx", ".html", ".htm"}
 )
 
+_INVALID_FILENAME_DETAIL = "Uploaded file must include a valid filename."
+
 
 @router.post(
     "/file",
@@ -56,31 +58,43 @@ async def ingest_file(
     """Validate, store, and ingest an uploaded document.
 
     Processing flow:
-    1. Reject unsupported file extensions with HTTP 415.
-    2. Read the uploaded content into memory.
-    3. Write to a temporary directory preserving the original filename so that
+    1. Reject empty, whitespace-only, or NUL-containing filenames with HTTP 422.
+    2. Reduce the client filename to a pure basename (directories and both
+       path-separator styles stripped) and reject unsupported extensions with
+       HTTP 415.
+    3. Read the uploaded content into memory.
+    4. Write to a dedicated temporary directory under the sanitized filename,
+       asserting the target is a direct child of that directory, so that
        ``pipeline.ingest_document`` derives the correct ``document_id`` from
        the file stem.
-    4. Delegate the full chunk → embed → index pipeline to ``IngestionPipeline``.
-    5. Clean up the temporary directory unconditionally.
+    5. Delegate the full chunk → embed → index pipeline to ``IngestionPipeline``.
+    6. Remove exactly that temporary directory, unconditionally.
 
     Args:
         file: Multipart ``UploadFile`` provided by FastAPI.
         pipeline: Injected ``IngestionPipeline`` resolved from application state.
 
     Returns:
-        ``IngestResponse`` confirming the filename and number of indexed chunks.
+        ``IngestResponse`` confirming the sanitized filename and number of
+        indexed chunks.
 
     Raises:
         HTTPException 415: When the uploaded file extension is not in
             ``_ALLOWED_EXTENSIONS``.
-        HTTPException 422: When no filename is present in the multipart upload.
+        HTTPException 422: When the filename is missing, blank, contains a NUL
+            byte, or does not reduce to a usable basename.
     """
-    filename: str = file.filename or ""
-    if not filename:
-        raise HTTPException(status_code=422, detail="Uploaded file must include a filename.")
+    raw_filename: str = file.filename or ""
+    if not raw_filename.strip() or "\x00" in raw_filename:
+        raise HTTPException(status_code=422, detail=_INVALID_FILENAME_DETAIL)
 
-    suffix: str = Path(filename).suffix.lower()
+    # Clients may send Windows-style separators, which ``Path`` on POSIX would
+    # treat as part of a single name; normalize first so only the basename survives.
+    safe_filename: str = Path(raw_filename.replace("\\", "/")).name
+    if not safe_filename.strip() or safe_filename in {".", ".."}:
+        raise HTTPException(status_code=422, detail=_INVALID_FILENAME_DETAIL)
+
+    suffix: str = Path(safe_filename).suffix.lower()
     if suffix not in _ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=415,
@@ -92,31 +106,30 @@ async def ingest_file(
 
     content: bytes = await file.read()
 
-    # Write to a named temp directory that preserves the original filename.
-    # ``IngestionPipeline.ingest_document`` uses ``Path.stem`` as the
-    # ``document_id``, so maintaining the original name is load-bearing.
-    def _write_temp() -> Path:
-        tmp_dir = Path(tempfile.mkdtemp())
-        tmp_file = tmp_dir / filename
-        tmp_file.write_bytes(content)
-        return tmp_file
-
-    tmp_path: Path = await asyncio.to_thread(_write_temp)
-
+    # The sandbox is owned by this request alone: cleanup targets ``temp_dir``
+    # directly and never a path derived from client input.
+    temp_dir: Path = Path(await asyncio.to_thread(tempfile.mkdtemp))
     try:
-        chunks_ingested: int = await pipeline.ingest_document(tmp_path)
+        dest_path: Path = (temp_dir / safe_filename).resolve()
+        if dest_path.parent != temp_dir.resolve():
+            raise HTTPException(status_code=422, detail=_INVALID_FILENAME_DETAIL)
+
+        # ``IngestionPipeline.ingest_document`` uses ``Path.stem`` as the
+        # ``document_id``, so maintaining the sanitized name is load-bearing.
+        await asyncio.to_thread(dest_path.write_bytes, content)
+        chunks_ingested: int = await pipeline.ingest_document(dest_path)
     finally:
         # Unconditional cleanup — errors during ingestion must not leave
         # temporary data on disk.
-        await asyncio.to_thread(lambda: shutil.rmtree(tmp_path.parent, ignore_errors=True))
+        await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
 
     logger.info(
         "Document ingested. filename=%r chunks=%d",
-        filename,
+        safe_filename,
         chunks_ingested,
     )
     return IngestResponse(
         status="success",
-        filename=filename,
+        filename=safe_filename,
         chunks_ingested=chunks_ingested,
     )
