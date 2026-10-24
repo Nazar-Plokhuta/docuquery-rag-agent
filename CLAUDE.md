@@ -10,11 +10,11 @@ Deliver production-ready, maintainable, strictly typed code adhering to high-rel
 
 ## Monorepo Layout
 - `apps/api/` — the FastAPI service: `src/`, `tests/`, `pyproject.toml` (Ruff + Pytest config), `Dockerfile`. Also the Docker build context.
-- `apps/web/` — reserved for the Next.js frontend (v2.1.0); not yet present.
+- `apps/web/` — DocuQuery Studio, the Next.js (App Router, Tailwind v4, shadcn/ui) frontend. Standalone pnpm project (no root workspace). `next.config.ts` rewrites `/api/v1/*` to `API_INTERNAL_URL` (default `http://localhost:8000`; see `apps/web/.env.example`).
 - `docker/` — `docker-compose.yml`: `db` (PostgreSQL 16), `api` (build context `../apps/api`, runs `alembic upgrade head` before Uvicorn, bind-mounts the repo-level `data/`), and an optional standalone `chroma` service behind the `chroma` profile. Compose builds the api `DATABASE_URL` from `POSTGRES_*` and ignores the one in `.env`.
 - `data/sample_docs/`, `scripts/`, `docs/` — shared, repository-level assets. Scripts resolve `apps/api` and `data/` from their own location, so they run from any directory.
 - `.env` lives at the repository root and is shared across apps. `Settings` resolves it by absolute path; a `.env` in the working directory overrides it.
-- Every `src/...` and `tests/...` path in this guide is relative to `apps/api/`.
+- Every `src/...` and `tests/...` path in this guide is relative to `apps/api/` (the `apps/web` section below is relative to `apps/web/`).
 
 ---
 
@@ -68,8 +68,21 @@ The toolchain is `uv`; `apps/api/uv.lock` is the single source of truth for depe
 
 ---
 
+## Web Frontend (`apps/web`) Standards & Verification
+Run from the repository root with `--dir apps/web` (or drop it inside `apps/web/`). Next.js here is 16.x: `apps/web/AGENTS.md` mandates reading `node_modules/next/dist/docs/` before relying on remembered APIs.
+- **Install:** `pnpm --dir apps/web install`
+- **Dev server:** `pnpm --dir apps/web dev` (port 3000; start the API on 8000 first)
+- **Lint:** `pnpm --dir apps/web lint`
+- **Type check:** `pnpm --dir apps/web exec tsc --noEmit`
+- **Production build:** `pnpm --dir apps/web build` (must stay green; `cacheComponents` is enabled)
+- **Proxy invariants (do not regress):** call FastAPI with its trailing slashes (`/api/v1/health/`); keep `skipTrailingSlashRedirect: true`, the `:path(.*)` rewrite (plain `:path*` drops the trailing slash and FastAPI then 307s to `:8000`, bypassing the proxy), and `compress: false` (Next's gzip buffers proxied SSE into one burst).
+- **shadcn/ui:** components live in `src/components/ui/` and import `cn` from `@/lib/utils`. After `shadcn add`, verify no component imports `cn` from the npm package of that name.
+- **Streaming check:** run the stream through `http://localhost:3000` with `curl -N` and a browser-style `-H "Accept-Encoding: gzip"`; events must arrive incrementally, not at the end.
+
+---
+
 ## Operational Workflow for Claude Code
-1. **Zero Regressions:** After any file modification, run `uv run --directory apps/api pytest` to guarantee all tests continue to pass (100% green suite).
+1. **Zero Regressions:** After any file modification, run `uv run --directory apps/api pytest` to guarantee all tests continue to pass (100% green suite). After changes under `apps/web/`, also run its lint and build.
 2. **Offline Tests:** Do not introduce unmocked live network calls to LLM providers or external endpoints in tests. Patch `litellm.acompletion` / `litellm.aembedding`; `tests/conftest.py` installs an autouse guard that fails any un-mocked call.
 3. **Concise Execution:** Lead directly with concrete code changes, diffs, and command execution.
 

@@ -30,3 +30,8 @@ ENV/
 
 # Docker / Logs
 *.log
+
+# Node / Next.js (apps/web)
+node_modules/
+.next/
+.turbo/
